@@ -41,7 +41,7 @@ void demo_provisioning_enter(void)
     lv_label_set_text(s_info, "正在启动热点…");
     lv_screen_load(s_scr);
     s_timer = lv_timer_create(refresh, 500, NULL);
-    refresh();
+    refresh(NULL);
 }
 
 esp_err_t demo_provisioning_start(void)
