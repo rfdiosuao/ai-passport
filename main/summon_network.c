@@ -20,6 +20,8 @@ static volatile bool connected,enabled;
 static char token[96],headers[160];
 static char assembly[2048];
 static size_t assembled;
+static volatile unsigned generation;
+typedef struct {char *text;unsigned generation;} queued_frame;
 
 bool summon_network_online(void) {return connected;}
 bool summon_network_enabled(void) {return enabled;}
@@ -38,15 +40,15 @@ bool summon_network_set_token(const char *value) {
 }
 bool summon_network_send(const char *json) {
     if(!connected || strlen(json)>=2048) return false;
-    char *copy=strdup(json);
-    if(!copy) return false;
-    if(xQueueSend(outgoing,&copy,pdMS_TO_TICKS(100))!=pdTRUE) {free(copy);return false;}
+    queued_frame frame={.text=strdup(json),.generation=generation};
+    if(!frame.text) return false;
+    if(xQueueSend(outgoing,&frame,pdMS_TO_TICKS(100))!=pdTRUE) {free(frame.text);return false;}
     return true;
 }
 static void event(void *arg,esp_event_base_t base,int32_t id,void *data) {
     (void)arg;(void)base;
     if(id==WEBSOCKET_EVENT_CONNECTED) {connected=true;assembled=0;}
-    else if(id==WEBSOCKET_EVENT_DISCONNECTED || id==WEBSOCKET_EVENT_ERROR) {connected=false;assembled=0;}
+    else if(id==WEBSOCKET_EVENT_DISCONNECTED || id==WEBSOCKET_EVENT_ERROR) {connected=false;assembled=0;generation++;}
     else if(id==WEBSOCKET_EVENT_DATA) {
         esp_websocket_event_data_t *e=data;
         if(e->op_code!=1 || e->payload_len<=0 || e->payload_len>=sizeof(assembly)) return;
@@ -54,26 +56,27 @@ static void event(void *arg,esp_event_base_t base,int32_t id,void *data) {
         if(e->payload_offset!=assembled || assembled+e->data_len>=sizeof(assembly)) {assembled=0;return;}
         memcpy(assembly+assembled,e->data_ptr,e->data_len);assembled+=e->data_len;
         if(assembled==e->payload_len) {
-            assembly[assembled]=0;char *copy=strdup(assembly);
-            if(copy && xQueueSend(incoming,&copy,0)!=pdTRUE) free(copy);
+            assembly[assembled]=0;queued_frame frame={.text=strdup(assembly),.generation=generation};
+            if(frame.text && xQueueSend(incoming,&frame,0)!=pdTRUE) free(frame.text);
             assembled=0;
         }
     }
 }
 static void rx_task(void *arg) {
-    (void)arg;char *value;
-    for(;;) if(xQueueReceive(incoming,&value,portMAX_DELAY)==pdTRUE) {if(connected) receiver(value);free(value);}
+    (void)arg;queued_frame frame;
+    for(;;) if(xQueueReceive(incoming,&frame,portMAX_DELAY)==pdTRUE) {if(connected && frame.generation==generation) receiver(frame.text);free(frame.text);}
 }
 static void tx_task(void *arg) {
-    (void)arg;char *value;
-    for(;;) if(xQueueReceive(outgoing,&value,portMAX_DELAY)==pdTRUE) {
-        if(connected) esp_websocket_client_send_text(client,value,strlen(value),pdMS_TO_TICKS(2000));
-        free(value);
+    (void)arg;queued_frame frame;
+    for(;;) if(xQueueReceive(outgoing,&frame,portMAX_DELAY)==pdTRUE) {
+        if(connected && frame.generation==generation) esp_websocket_client_send_text(client,frame.text,strlen(frame.text),pdMS_TO_TICKS(2000));
+        free(frame.text);
     }
 }
 static void network_task(void *arg) {
-    (void)arg;bool clock_started=false;unsigned retry=0;
+    (void)arg;bool clock_started=false;unsigned retry=0,last_generation=0;
     for(;;) {
+        if(last_generation!=generation) {last_generation=generation;receiver("{\"type\":\"network.lost\"}");}
         if(enabled && provisioning_configured()) {
             if(provisioning_state()!=PROV_CONNECTED) {
                 if(retry++%10==0) provisioning_connect_saved();
@@ -100,7 +103,7 @@ static void network_task(void *arg) {
 void summon_network_init(summon_receive_fn receive) {
     receiver=receive;nvs_handle_t h;
     if(nvs_open("summon",NVS_READONLY,&h)==ESP_OK) {size_t n=sizeof(token);if(nvs_get_str(h,"device_token",token,&n)!=ESP_OK) token[0]=0;nvs_close(h);}
-    enabled=provisioning_configured();incoming=xQueueCreate(12,sizeof(char*));outgoing=xQueueCreate(16,sizeof(char*));
+    enabled=provisioning_configured();incoming=xQueueCreate(12,sizeof(queued_frame));outgoing=xQueueCreate(16,sizeof(queued_frame));
     if(!incoming || !outgoing) return;
     xTaskCreate(rx_task,"cloud_rx",6144,NULL,3,NULL);
     xTaskCreate(tx_task,"cloud_tx",4096,NULL,4,NULL);

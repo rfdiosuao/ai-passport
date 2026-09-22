@@ -260,7 +260,7 @@ static esp_err_t connect_sta(const char *ssid, const char *pass, unsigned epoch)
     cfg.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
     cfg.sta.threshold.authmode = pass[0] ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN;
 
-    esp_err_t err = esp_wifi_set_mode(WIFI_MODE_APSTA);
+    esp_err_t err = esp_wifi_set_mode(s_ap_up ? WIFI_MODE_APSTA : WIFI_MODE_STA);
     if (err != ESP_OK) return err;
     s_state=PROV_AP_READY;esp_wifi_disconnect();vTaskDelay(pdMS_TO_TICKS(100));
     err = esp_wifi_set_config(WIFI_IF_STA, &cfg);
@@ -284,6 +284,8 @@ static esp_err_t connect_sta(const char *ssid, const char *pass, unsigned epoch)
 typedef struct { char ssid[33], pass[65], nameplate[64]; unsigned epoch; } save_job;
 static void save_worker(void *arg) {
     save_job *job=arg;
+    // Send the HTTP acceptance before APSTA switches channel with the router.
+    vTaskDelay(pdMS_TO_TICKS(400));
     esp_err_t err=connect_sta(job->ssid,job->pass,job->epoch);
     if(err==ESP_OK) err=nvs_write_str(NVS_KEY_SSID,job->ssid);
     if(err==ESP_OK) err=nvs_write_str(NVS_KEY_PASS,job->pass);

@@ -12,6 +12,7 @@
 #include "mbedtls/base64.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "esp_bt.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -178,6 +179,9 @@ static void receive(const char *line) {
     cJSON *op=cJSON_GetObjectItem(j,"type"), *id=cJSON_GetObjectItem(j,"turn");
     if(!cJSON_IsString(op)) {cJSON_Delete(j);return;}
     if(strcmp(op->valuestring,"hello")==0) hello();
+    else if(strcmp(op->valuestring,"network.lost")==0) {
+        cancelled=true;playing=false;xQueueReset(playback);status("连接断开，正在重连\n未完成的指令不会重放");
+    }
     else if(strcmp(op->valuestring,"remote.begin")==0 && cJSON_IsNumber(id) && !recording && !playing && !configuring) {
         turn=(unsigned)id->valuedouble;cancelled=false;send_json(message("remote.ready",turn));
     }
@@ -231,6 +235,8 @@ static void usb_task(void *unused) {
     }
 }
 void app_main(void) {
+    // Wi-Fi-only application: release the template's reserved BLE memory.
+    esp_bt_controller_mem_release(ESP_BT_MODE_BLE);
     tx_lock=xSemaphoreCreateMutex(); keys=xQueueCreate(8,sizeof(key_event));playback=xQueueCreate(16,sizeof(playback_chunk));
     if(!tx_lock || !keys || !playback) return;
     ESP_ERROR_CHECK(bsp_i2c_init());
