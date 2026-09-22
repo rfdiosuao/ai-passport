@@ -49,6 +49,12 @@
 
 - [离线宝可梦图鉴](sunny0826/offline-pokedex/README.zh_CN.md) — 把全部 1025 只宝可梦与精灵、叫声内嵌固件的全离线图鉴。
 
+### rfdiosuao
+
+**经验条目：**
+
+- [刷写前先识别量产机及其出厂布局](rfdiosuao/identifying-a-production-unit-before-flashing.zh_CN.md) —— esptool v5 子命令改名、`get-security-info` 的放行判断、量出合并 `0x0` 刷写在量产机上真正覆盖与真正变得不可寻址的范围，以及先做 `image-info` 与整片回读。
+
 ## 新增经验条目
 
 一次发布可沉淀**一条或多条**可复用经验，每条作为独立条目新增，以发布版本（tag 或 commit）作为上下文。遵守仓库语言规则：默认 `.md` 路径用英文、配套 `.zh_CN.md` 用简体中文，并在同一次变更中对齐。

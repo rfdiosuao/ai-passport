@@ -56,6 +56,12 @@ The engineering rules themselves live under
 
 - [Offline Pokédex](sunny0826/offline-pokedex/README.md) — a fully offline Pokédex that embeds all 1,025 Pokémon, their sprites, and cries in the firmware.
 
+### rfdiosuao
+
+**Experience entries:**
+
+- [Identify a Production Unit and Its Shipped Layout Before Flashing](rfdiosuao/identifying-a-production-unit-before-flashing.md) — esptool v5's renamed subcommands, the `get-security-info` go/no-go check, measuring what a merged `0x0` flash actually overwrites versus what it makes unaddressable on a retail unit, and reading `image-info` plus a full backup first.
+
 ## Adding an experience entry
 
 Each release may produce **one or more** reusable, post-release learnings; each is
