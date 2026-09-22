@@ -116,30 +116,21 @@ static const char INDEX_PAGE[] =
 "body{font-family:system-ui,sans-serif;background:#0b0c0a;color:#e7e9e4;margin:0;padding:16px}"
 ".card{max-width:420px;margin:0 auto;background:#171a1d;border-radius:14px;padding:18px}"
 "h1{font-size:18px;margin:0 0 12px}label{display:block;font-size:13px;margin:14px 0 4px;color:#9aa4ad}"
-"input{box-sizing:border-box;width:100%;padding:10px;border:1px solid #2c3338;border-radius:8px;background:#0f1113;color:#e7e9e4;font-size:15px}"
+"input,select{box-sizing:border-box;width:100%;padding:10px;border:1px solid #2c3338;border-radius:8px;background:#0f1113;color:#e7e9e4;font-size:15px}"
 ".row{display:flex;gap:8px}.row input{flex:1}button{background:#1689e8;color:#fff;border:0;border-radius:8px;padding:10px 14px;font-size:14px}"
-"#msg{margin-top:14px;font-size:14px;min-height:20px}#msg.ok{color:#82be2d}#msg.err{color:#e43b2f}"
+"#status{margin-top:14px;font-size:14px;min-height:20px}#status.ok{color:#82be2d}#status.err{color:#e43b2f}"
 "</style><div class=card><h1>SUMMON 设备配网</h1>"
 "<label>目标 Wi-Fi 名称 (SSID)</label>"
-"<div class=row><input id=ssid placeholder='手动输入或扫描'><button id=scan>扫描</button></div>"
-"<label>密码</label><div class=row><input id=pass type=password placeholder='Wi-Fi 密码'><button id=toggle>显示</button></div>"
+"<div class=row><input id=ssid placeholder='手动输入或扫描'><button id=scan type=button onclick='doScan()'>扫描</button></div>"
+"<label>密码</label><div class=row><input id=pass type=password placeholder='Wi-Fi 密码'><button type=button onclick='togglePw(this)'>显示</button></div>"
 "<label>Agent 铭牌</label><input id=nameplate placeholder='可选'>"
-"<button id=save style='width:100%;margin-top:18px'>保存并连接</button>"
-"<div id=msg></div></div>"
+"<button type=button onclick='doSave(this)' style='width:100%;margin-top:18px'>保存并连接</button>"
+"<div id=status></div></div>"
 "<script>"
-"var $=function(i){return document.getElementById(i)};"
-"function msg(t,ok){var m=$('msg');m.textContent=t;m.className=ok?'ok':'err'}"
-"$('toggle').onclick=function(){var p=$('pass');p.type=p.type==='password'?'text':'password';this.textContent=p.type==='password'?'显示':'隐藏'}"
-"$('scan').onclick=function(){this.disabled=true;msg('扫描中…');fetch('/scan').then(r=>r.json()).then(function(a){"
-"if(!a.length){msg('未发现热点');return}"
-"var d=document.createElement('select');d.id='apd';d.style.cssText='box-sizing:border-box;width:100%;padding:10px;margin-top:6px;border:1px solid #2c3338;border-radius:8px;background:#0f1113;color:#e7e9e4';"
-"a.forEach(function(x){var o=document.createElement('option');o.textContent=x.ssid+' ('+x.rssi+'dBm)';o.value=x.ssid;d.appendChild(o)});"
-"var s=$('ssid');s.parentNode.insertBefore(d,s.nextSibling);d.onchange=function(){s.value=this.value;this.remove()};msg('选一个热点')"
-"}).catch(function(){msg('扫描失败')}).finally(function(){$('scan').disabled=false})}"
-"$('save').onclick=function(){this.disabled=true;msg('保存中…');"
-"var body=new URLSearchParams();body.set('ssid',$('ssid').value);body.set('pass',$('pass').value);body.set('nameplate',$('nameplate').value);"
-"fetch('/save',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body}).then(r=>r.json()).then(function(j){"
-"msg(j.ok?('已连接: '+j.ip):('失败: '+j.message),j.ok)}).catch(function(){msg('请求失败')}).finally(function(){$('save').disabled=false})}"
+"function setStatus(t,ok){var s=document.getElementById('status');s.textContent=t;s.className=ok?'ok':'err'}\n"
+"function togglePw(btn){var p=document.getElementById('pass');p.type=(p.type==='password')?'text':'password';btn.textContent=(p.type==='password')?'显示':'隐藏'}\n"
+"function doScan(){var b=document.getElementById('scan');b.disabled=true;setStatus('扫描中…');fetch('/scan').then(function(r){return r.json()}).then(function(a){if(!a.length){setStatus('未发现热点');return}var d=document.createElement('select');a.forEach(function(x){var o=document.createElement('option');o.textContent=x.ssid+' ('+x.rssi+'dBm)';o.value=x.ssid;d.appendChild(o)});var s=document.getElementById('ssid');s.parentNode.insertBefore(d,s.nextSibling);d.onchange=function(){s.value=this.value;this.remove()};setStatus('选一个热点')}).catch(function(){setStatus('扫描失败')}).finally(function(){b.disabled=false})}\n"
+"function doSave(btn){btn.disabled=true;setStatus('保存中…');var body=new URLSearchParams();body.set('ssid',document.getElementById('ssid').value);body.set('pass',document.getElementById('pass').value);body.set('nameplate',document.getElementById('nameplate').value);fetch('/save',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body}).then(function(r){return r.json()}).then(function(j){setStatus(j.ok?('已连接: '+j.ip):('失败: '+j.message),j.ok)}).catch(function(){setStatus('请求失败')}).finally(function(){btn.disabled=false})}\n"
 "</script>";
 
 static esp_err_t http_get_index(httpd_req_t *req)
@@ -210,9 +201,35 @@ static esp_err_t connect_sta(const char *ssid, const char *pass)
     return ESP_ERR_TIMEOUT;
 }
 
+// 把 URL 编码表单值解码进 dst(+ -> 空格,%XX -> 字节)。
+static void url_decode(const char *src, char *dst, size_t dst_size)
+{
+    size_t o = 0;
+    for (const char *p = src; *p && o + 1 < dst_size; p++) {
+        if (*p == '+') {
+            dst[o++] = ' ';
+        } else if (*p == '%' && p[1] && p[2]) {
+            unsigned v = 0;
+            for (int k = 1; k <= 2; k++) {
+                char c = p[k];
+                v <<= 4;
+                if (c >= '0' && c <= '9') v |= (unsigned)(c - '0');
+                else if (c >= 'a' && c <= 'f') v |= (unsigned)(c - 'a' + 10);
+                else if (c >= 'A' && c <= 'F') v |= (unsigned)(c - 'A' + 10);
+                else { v = 0; break; }
+            }
+            dst[o++] = (char)(v & 0xFF);
+            p += 2;
+        } else {
+            dst[o++] = *p;
+        }
+    }
+    dst[o] = '\0';
+}
+
 static esp_err_t http_post_save(httpd_req_t *req)
 {
-    char buf[320] = { 0 };
+    char buf[400] = { 0 };
     int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
     if (len <= 0) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "empty body");
@@ -220,6 +237,7 @@ static esp_err_t http_post_save(httpd_req_t *req)
     }
     buf[len] = '\0';
 
+    char raw_ssid[128] = { 0 }, raw_pass[128] = { 0 }, raw_name[128] = { 0 };
     char ssid[33] = { 0 }, pass[65] = { 0 }, nameplate[64] = { 0 };
     char *save = NULL;
     for (char *tok = strtok_r(buf, "&", &save); tok; tok = strtok_r(NULL, "&", &save)) {
@@ -227,10 +245,13 @@ static esp_err_t http_post_save(httpd_req_t *req)
         if (!eq) continue;
         *eq = '\0';
         char *val = eq + 1;
-        if (strcmp(tok, "ssid") == 0) snprintf(ssid, sizeof(ssid), "%s", val);
-        else if (strcmp(tok, "pass") == 0) snprintf(pass, sizeof(pass), "%s", val);
-        else if (strcmp(tok, "nameplate") == 0) snprintf(nameplate, sizeof(nameplate), "%s", val);
+        if (strcmp(tok, "ssid") == 0) snprintf(raw_ssid, sizeof(raw_ssid), "%s", val);
+        else if (strcmp(tok, "pass") == 0) snprintf(raw_pass, sizeof(raw_pass), "%s", val);
+        else if (strcmp(tok, "nameplate") == 0) snprintf(raw_name, sizeof(raw_name), "%s", val);
     }
+    url_decode(raw_ssid, ssid, sizeof(ssid));
+    url_decode(raw_pass, pass, sizeof(pass));
+    url_decode(raw_name, nameplate, sizeof(nameplate));
     if (ssid[0] == '\0') {
         httpd_resp_set_type(req, "application/json");
         httpd_resp_send(req, "{\"ok\":false,\"message\":\"SSID 不能为空\"}", HTTPD_RESP_USE_STRLEN);
