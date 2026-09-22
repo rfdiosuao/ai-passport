@@ -121,10 +121,11 @@ static const char INDEX_PAGE[] =
 ".row{display:flex;gap:8px}.row input{flex:1}button{background:#1689e8;color:#fff;border:0;border-radius:8px;padding:10px 14px;font-size:14px}"
 "#status{margin-top:14px;font-size:14px;min-height:20px}#status.ok{color:#82be2d}#status.err{color:#e43b2f}"
 "</style><div class=card><h1>SUMMON 设备配网</h1>"
-"<label>目标 Wi-Fi 名称 (SSID)</label>"
+"<p>语音通过 USB 连接电脑。只设置铭牌时，可不填写 Wi-Fi。</p>"
+"<label>目标 Wi-Fi 名称 (SSID，可选)</label>"
 "<div class=row><input id=ssid placeholder='手动输入或扫描'><button id=scan type=button onclick='doScan()'>扫描</button></div>"
 "<label>密码</label><div class=row><input id=pass type=password placeholder='Wi-Fi 密码'><button type=button onclick='togglePw(this)'>显示</button></div>"
-"<label>Agent 铭牌</label><input id=nameplate placeholder='可选'>"
+"<label>Agent 铭牌</label><input id=nameplate placeholder='SMN-XXXX-XXXX'>"
 "<button type=button onclick='doSave(this)' style='width:100%;margin-top:18px'>保存并连接</button>"
 "<div id=status></div></div>"
 "<script>"
@@ -253,10 +254,28 @@ static esp_err_t http_post_save(httpd_req_t *req)
     url_decode(raw_ssid, ssid, sizeof(ssid));
     url_decode(raw_pass, pass, sizeof(pass));
     url_decode(raw_name, nameplate, sizeof(nameplate));
-    if (ssid[0] == '\0') {
+    if (ssid[0] == '\0' && nameplate[0] == '\0') {
         httpd_resp_set_type(req, "application/json");
-        httpd_resp_send(req, "{\"ok\":false,\"message\":\"SSID 不能为空\"}", HTTPD_RESP_USE_STRLEN);
+        httpd_resp_send(req, "{\"ok\":false,\"message\":\"请填写 Wi-Fi 或 Agent 铭牌\"}", HTTPD_RESP_USE_STRLEN);
         return ESP_OK;
+    }
+
+    if (nameplate[0]) {
+        bool valid = strlen(nameplate) == 13 && strncmp(nameplate,"SMN-",4)==0 && nameplate[8]=='-';
+        for(size_t i=4; valid && i<13; i++) {
+            if(i==8) continue;
+            if(!strchr("0123456789ABCDEFGHJKMNPQRSTVWXYZ",nameplate[i])) valid=false;
+        }
+        if(!valid) {
+            httpd_resp_set_type(req,"application/json");
+            return httpd_resp_send(req,"{\"ok\":false,\"message\":\"铭牌格式为 SMN-XXXX-XXXX\"}",HTTPD_RESP_USE_STRLEN);
+        }
+    }
+    if (ssid[0] == '\0') {
+        esp_err_t saved=nvs_write_str(NVS_KEY_NAME,nameplate);
+        if(saved==ESP_OK) snprintf(s_nameplate,sizeof(s_nameplate),"%s",nameplate);
+        httpd_resp_set_type(req,"application/json");
+        return httpd_resp_send(req,saved==ESP_OK ? "{\"ok\":true,\"ip\":\"铭牌已保存，双击设备确定键返回\"}" : "{\"ok\":false,\"message\":\"保存失败\"}",HTTPD_RESP_USE_STRLEN);
     }
 
     esp_err_t err = connect_sta(ssid, pass);
