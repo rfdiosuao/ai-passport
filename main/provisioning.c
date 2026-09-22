@@ -73,6 +73,7 @@ static esp_err_t nvs_write_str(const char *key, const char *value)
     esp_err_t err = nvs_open_rw(&h);
     if (err != ESP_OK) return err;
     err = nvs_set_str(h, key, value ? value : "");
+    if (err == ESP_OK) err = nvs_commit(h);
     nvs_close(h);
     return err;
 }
@@ -372,7 +373,7 @@ esp_err_t provisioning_start(void)
     s_ap_up = true;
     s_state = PROV_AP_READY;
     start_httpd();
-    ESP_LOGI(TAG, "热点 %s 就绪,密码 %s,地址 %s", s_ap_ssid, s_ap_pass, AP_IP);
+    ESP_LOGI(TAG, "配网热点已就绪，凭据仅在设备屏幕显示");
     return ESP_OK;
 }
 

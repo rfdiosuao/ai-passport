@@ -1,5 +1,5 @@
 idf_component_register(
-    SRCS "main.c"
+    SRCS "summon_voice.c"
          "demo_navigation.c"
          "ui_pixel.c"
          "ui_pixel_math.c"
@@ -16,7 +16,7 @@ idf_component_register(
          "demo_low_power.c"
          "demo_provisioning.c"
     INCLUDE_DIRS "."
-    REQUIRES bsp bt esp_event esp_hw_support esp_http_server esp_netif esp_timer esp_wifi nvs_flash
+    REQUIRES json mbedtls bsp bt esp_event esp_hw_support esp_http_server esp_netif esp_timer esp_wifi nvs_flash
 )
 
 # 中文字库:按 docs/development/engineering/lvgl-chinese-fonts.md 第 4 节注册,
