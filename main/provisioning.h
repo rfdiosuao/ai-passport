@@ -22,6 +22,8 @@ esp_err_t provisioning_init(void);
 
 // 是否已有可用 Wi-Fi 配置(决定是否首启进配网)。
 bool provisioning_configured(void);
+// Worker-task only: reconnect saved Wi-Fi without keeping the setup hotspot open.
+esp_err_t provisioning_connect_saved(void);
 
 // 打开 SoftAP + 本地网页。已打开时幂等返回。
 esp_err_t provisioning_start(void);

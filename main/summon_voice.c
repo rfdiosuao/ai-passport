@@ -5,6 +5,7 @@
 #include "bsp_audio.h"
 #include "bsp_battery.h"
 #include "provisioning.h"
+#include "summon_network.h"
 #include "ui_font.h"
 #include "lvgl.h"
 #include "cJSON.h"
@@ -27,7 +28,7 @@ static QueueHandle_t playback;
 static volatile bool play_ended;
 static unsigned play_sequence;
 static SemaphoreHandle_t tx_lock;
-static lv_obj_t *status_label, *plate_label, *battery_label, *volume_label;
+static lv_obj_t *status_label, *plate_label, *battery_label, *volume_label, *network_label;
 static volatile bool recording, cancelled, configuring, playing, finish_recording;
 static volatile unsigned turn;
 static bool audio_ready;
@@ -37,7 +38,9 @@ static void send_json(cJSON *j) {
     char *s = cJSON_PrintUnformatted(j);
     if (s) {
         xSemaphoreTake(tx_lock, portMAX_DELAY);
-        printf("\nSUMMON1 %s\n", s); fflush(stdout);
+        if(summon_network_online()) {
+            if(!summon_network_send(s)) cancelled=true;
+        } else {printf("\nSUMMON1 %s\n", s); fflush(stdout);}
         xSemaphoreGive(tx_lock); free(s);
     }
     cJSON_Delete(j);
@@ -60,7 +63,7 @@ static void status(const char *s) {
 }
 static void hello(void) {
     cJSON *j=message("hello",turn);
-    cJSON_AddStringToObject(j,"firmware","summon-usb-voice-2");
+    cJSON_AddStringToObject(j,"firmware","summon-network-voice-1");
     cJSON_AddStringToObject(j,"nameplate",provisioning_nameplate());
     cJSON_AddNumberToObject(j,"sample_rate",16000);
     cJSON_AddBoolToObject(j,"audio_ready",audio_ready);
@@ -133,11 +136,16 @@ static void on_key(bsp_btn_t key,bsp_btn_ev_t event,void *arg) {
 }
 static void begin_record(void) {
     if(recording || playing || configuring || !audio_ready) return;
+    if(summon_network_enabled() && !summon_network_online()) {status("云端未连接\n长按上键配网\n长按下键联网");return;}
     cancelled=false;finish_recording=false;turn++;recording=true;xTaskNotifyGive(recorder);
 }
 static void key_task(void *unused) {
     (void)unused; key_event e;int volume=-1;
     for (;;) {
+        if(bsp_lvgl_lock(50)) {
+            lv_label_set_text(network_label,summon_network_online() ? "云端在线" : summon_network_enabled() ? "正在联网" : "USB 模式");
+            bsp_lvgl_unlock();
+        }
         int next=provisioning_volume();
         if(volume!=next) {
             volume=next;if(audio_ready) bsp_audio_set_volume((uint8_t)volume);
@@ -147,7 +155,7 @@ static void key_task(void *unused) {
         if(xQueueReceive(keys,&e,pdMS_TO_TICKS(100))!=pdTRUE) continue;
         if(e.key==BSP_BTN_OK && (e.event==BSP_BTN_DOUBLE || e.event==BSP_BTN_LONG)) {
             cancelled=true;playing=false;xQueueReset(playback);send_json(message("cancel",turn));
-            if(configuring) {provisioning_stop();configuring=false;}
+            if(configuring) {provisioning_stop();configuring=false;if(provisioning_configured()) summon_network_enable();}
             status("已返回\n确定说话 · 长按上键配网");
         } else if(e.event==BSP_BTN_CLICK && e.key==BSP_BTN_OK) {
             if(recording) finish_recording=true; else begin_record();
@@ -160,6 +168,8 @@ static void key_task(void *unused) {
             char text[180];
             snprintf(text,sizeof(text),"手机连接热点\n%s\n密码 %s\n浏览器 192.168.4.1\n双击确定返回",provisioning_ap_ssid(),provisioning_ap_password());
             status(configuring ? text : "配网启动失败");
+        } else if(e.event==BSP_BTN_LONG && e.key==BSP_BTN_DOWN && !recording && !playing) {
+            summon_network_enable();status(provisioning_configured() ? "正在连接 Wi-Fi 与云端…" : "请先长按上键\n用手机配置 Wi-Fi");
         }
     }
 }
@@ -168,6 +178,9 @@ static void receive(const char *line) {
     cJSON *op=cJSON_GetObjectItem(j,"type"), *id=cJSON_GetObjectItem(j,"turn");
     if(!cJSON_IsString(op)) {cJSON_Delete(j);return;}
     if(strcmp(op->valuestring,"hello")==0) hello();
+    else if(strcmp(op->valuestring,"remote.begin")==0 && cJSON_IsNumber(id) && !recording && !playing && !configuring) {
+        turn=(unsigned)id->valuedouble;cancelled=false;send_json(message("remote.ready",turn));
+    }
     else if(strcmp(op->valuestring,"record")==0) begin_record();
     else if(cJSON_IsNumber(id) && (unsigned)id->valuedouble==turn && !cancelled) {
         if(strcmp(op->valuestring,"status")==0) {
@@ -200,7 +213,16 @@ static void usb_task(void *unused) {
         for(int i=0;i<got;i++) {
         char c=block[i];if(c=='\n') {
             line[n]=0;
-            if(!overflow && strncmp(line,"SUMMON1 ",8)==0) receive(line+8);
+            if(!overflow && strncmp(line,"SUMMON1 ",8)==0) {
+                cJSON *j=cJSON_Parse(line+8);
+                cJSON *op=j ? cJSON_GetObjectItem(j,"type") : NULL;
+                cJSON *secret=j ? cJSON_GetObjectItem(j,"device_token") : NULL;
+                if(cJSON_IsString(op) && strcmp(op->valuestring,"network.configure")==0 && cJSON_IsString(secret)) {
+                    bool ok=summon_network_set_token(secret->valuestring);
+                    printf("\nSUMMON1 {\"type\":\"network.configured\",\"ok\":%s}\n",ok ? "true" : "false");fflush(stdout);
+                } else if(!summon_network_online()) receive(line+8);
+                cJSON_Delete(j);
+            }
             n=0;overflow=false;
         } else if(c!='\r') {
             if(n+1<sizeof(line)) line[n++]=c; else overflow=true;
@@ -229,13 +251,15 @@ void app_main(void) {
     lv_obj_set_style_text_color(plate_label,lv_color_hex(0x6DE9D4),0);
     status_label=lv_label_create(screen);lv_obj_set_width(status_label,212);lv_obj_align(status_label,LV_ALIGN_TOP_LEFT,14,119);
     lv_label_set_long_mode(status_label,LV_LABEL_LONG_WRAP);
-    lv_obj_t *footer=lv_label_create(screen);lv_label_set_text(footer,"上下音量 / 长按上键配网\n确定说话 / 双击确定返回");lv_obj_align(footer,LV_ALIGN_BOTTOM_LEFT,12,-15);
+    network_label=lv_label_create(screen);lv_obj_align(network_label,LV_ALIGN_TOP_LEFT,12,96);
+    lv_obj_t *footer=lv_label_create(screen);lv_label_set_text(footer,"上下音量 / 长按上键配网\n长按下键联网 / 确定说话\n双击确定返回");lv_obj_align(footer,LV_ALIGN_BOTTOM_LEFT,12,-8);
     lv_screen_load(screen);bsp_lvgl_unlock();
     status(audio_ready ? "USB 连接电脑网关\n等待你的第一句话" : "音频初始化失败");
     if(xTaskCreate(record_task,"voice_record",6144,NULL,4,&recorder)!=pdPASS) return;
     if(xTaskCreate(playback_task,"voice_play",4096,NULL,5,NULL)!=pdPASS) return;
     if(xTaskCreate(key_task,"voice_keys",4096,NULL,3,NULL)!=pdPASS) return;
     if(xTaskCreate(usb_task,"voice_usb",8192,NULL,3,NULL)!=pdPASS) return;
+    summon_network_init(receive);
     ESP_ERROR_CHECK(bsp_button_init(on_key,NULL));hello();
     ESP_LOGI("summon","Voice ready; free heap=%lu",(unsigned long)esp_get_free_heap_size());
 }

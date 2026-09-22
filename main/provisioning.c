@@ -33,6 +33,7 @@ static bool s_nvs_ready;
 static bool s_netif_ready;
 static bool s_event_ready;
 static bool s_wifi_init;
+static bool s_wifi_started;
 static bool s_ap_up;
 static bool s_handlers_ready;
 static httpd_handle_t s_server;
@@ -121,7 +122,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t base, int32_t id, voi
     if (id == WIFI_EVENT_STA_DISCONNECTED) {
         if (s_state == PROV_CONNECTING || s_state == PROV_CONNECTED) {
             ESP_LOGW(TAG, "目标网络断开");
-            if (s_state == PROV_CONNECTING) s_state = PROV_WIFI_FAILED;
+            s_state = PROV_WIFI_FAILED;
         }
     }
 }
@@ -146,7 +147,7 @@ static const char INDEX_PAGE[] =
 ".row{display:flex;gap:8px}.row input{flex:1}button{background:#1689e8;color:#fff;border:0;border-radius:8px;padding:10px 14px;font-size:14px}"
 "#status{margin-top:14px;font-size:14px;min-height:20px}#status.ok{color:#82be2d}#status.err{color:#e43b2f}"
 "</style><div class=card><h1>SUMMON 设备配网</h1>"
-"<p>语音通过 USB 连接电脑。只设置铭牌时，可不填写 Wi-Fi。</p>"
+"<p>连接 2.4GHz Wi-Fi 后可直接上传语音、接收云端播报，无需 USB。铭牌选择 Agent；执行电脑由云端授权绑定。</p>"
 "<label>目标 Wi-Fi 名称 (SSID，可选)</label>"
 "<div class=row><input id=ssid placeholder='手动输入或扫描'><button id=scan type=button onclick='doScan()'>扫描</button></div>"
 "<label>密码</label><div class=row><input id=pass type=password placeholder='Wi-Fi 密码'><button type=button onclick='togglePw(this)'>显示</button></div>"
@@ -494,9 +495,10 @@ esp_err_t provisioning_start(void)
     esp_netif_set_ip_info(s_ap_netif, &ip);
     esp_netif_dhcps_start(s_ap_netif);
 
-    if (esp_wifi_start() != ESP_OK) return ESP_FAIL;
+    if (!s_wifi_started && esp_wifi_start() != ESP_OK) return ESP_FAIL;
+    s_wifi_started=true;
     s_ap_up = true;
-    s_state = PROV_AP_READY;
+    if(s_state!=PROV_CONNECTED) s_state = PROV_AP_READY;
     start_httpd();
     ESP_LOGI(TAG, "配网热点已就绪，凭据仅在设备屏幕显示");
     return ESP_OK;
@@ -506,10 +508,20 @@ esp_err_t provisioning_stop(void)
 {
     s_prov_epoch++;
     if (s_server) { httpd_stop(s_server); s_server = NULL; }
-    if (s_wifi_init) { esp_wifi_stop(); }
+    if (s_wifi_init) { esp_wifi_set_mode(WIFI_MODE_STA); }
     s_ap_up = false;
-    s_state = PROV_IDLE;
     return ESP_OK;
+}
+
+esp_err_t provisioning_connect_saved(void) {
+    if(!s_ssid[0] || s_ap_up || s_save_state==1 || s_state==PROV_CONNECTING) return ESP_ERR_INVALID_STATE;
+    if(s_state==PROV_CONNECTED) return ESP_OK;
+    if(!s_wifi_started) {
+        esp_err_t err=provisioning_start();
+        if(err!=ESP_OK) return err;
+        provisioning_stop();
+    }
+    return connect_sta(s_ssid,s_pass,s_prov_epoch);
 }
 
 provisioning_state_t provisioning_state(void) { return s_state; }
