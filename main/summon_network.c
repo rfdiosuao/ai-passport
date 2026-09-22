@@ -8,6 +8,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -15,6 +16,7 @@
 
 static esp_websocket_client_handle_t client;
 static QueueHandle_t incoming,outgoing;
+static SemaphoreHandle_t client_lock;
 static summon_receive_fn receiver;
 static volatile bool connected,enabled;
 static char token[96],headers[160];
@@ -69,7 +71,9 @@ static void rx_task(void *arg) {
 static void tx_task(void *arg) {
     (void)arg;queued_frame frame;
     for(;;) if(xQueueReceive(outgoing,&frame,portMAX_DELAY)==pdTRUE) {
-        if(connected && frame.generation==generation) esp_websocket_client_send_text(client,frame.text,strlen(frame.text),pdMS_TO_TICKS(2000));
+        xSemaphoreTake(client_lock,portMAX_DELAY);
+        if(client && connected && frame.generation==generation) esp_websocket_client_send_text(client,frame.text,strlen(frame.text),pdMS_TO_TICKS(2000));
+        xSemaphoreGive(client_lock);
         free(frame.text);
     }
 }
@@ -78,7 +82,10 @@ static void network_task(void *arg) {
     for(;;) {
         if(last_generation!=generation) {last_generation=generation;receiver("{\"type\":\"network.lost\"}");}
         if(provisioning_active() && client) {
+            xSemaphoreTake(client_lock,portMAX_DELAY);
+            connected=false;generation++;
             esp_websocket_client_stop(client);esp_websocket_client_destroy(client);client=NULL;connected=false;
+            xSemaphoreGive(client_lock);
         }
         if(enabled && provisioning_configured() && !provisioning_active()) {
             if(provisioning_state()!=PROV_CONNECTED) {
@@ -107,7 +114,8 @@ void summon_network_init(summon_receive_fn receive) {
     receiver=receive;nvs_handle_t h;
     if(nvs_open("summon",NVS_READONLY,&h)==ESP_OK) {size_t n=sizeof(token);if(nvs_get_str(h,"device_token",token,&n)!=ESP_OK) token[0]=0;nvs_close(h);}
     enabled=provisioning_configured();incoming=xQueueCreate(12,sizeof(queued_frame));outgoing=xQueueCreate(16,sizeof(queued_frame));
-    if(!incoming || !outgoing) return;
+    client_lock=xSemaphoreCreateMutex();
+    if(!incoming || !outgoing || !client_lock) return;
     xTaskCreate(rx_task,"cloud_rx",6144,NULL,3,NULL);
     xTaskCreate(tx_task,"cloud_tx",4096,NULL,4,NULL);
     xTaskCreate(network_task,"cloud_connect",4096,NULL,2,NULL);
