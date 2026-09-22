@@ -12,7 +12,6 @@
 #include "mbedtls/base64.h"
 #include "esp_log.h"
 #include "esp_system.h"
-#include "esp_bt.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -235,8 +234,6 @@ static void usb_task(void *unused) {
     }
 }
 void app_main(void) {
-    // Wi-Fi-only application: release the template's reserved BLE memory.
-    esp_bt_controller_mem_release(ESP_BT_MODE_BLE);
     tx_lock=xSemaphoreCreateMutex(); keys=xQueueCreate(8,sizeof(key_event));playback=xQueueCreate(16,sizeof(playback_chunk));
     if(!tx_lock || !keys || !playback) return;
     ESP_ERROR_CHECK(bsp_i2c_init());

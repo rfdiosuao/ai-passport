@@ -77,7 +77,10 @@ static void network_task(void *arg) {
     (void)arg;bool clock_started=false;unsigned retry=0,last_generation=0;
     for(;;) {
         if(last_generation!=generation) {last_generation=generation;receiver("{\"type\":\"network.lost\"}");}
-        if(enabled && provisioning_configured()) {
+        if(provisioning_active() && client) {
+            esp_websocket_client_stop(client);esp_websocket_client_destroy(client);client=NULL;connected=false;
+        }
+        if(enabled && provisioning_configured() && !provisioning_active()) {
             if(provisioning_state()!=PROV_CONNECTED) {
                 if(retry++%10==0) provisioning_connect_saved();
             } else if(token[0]) {

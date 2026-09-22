@@ -449,6 +449,7 @@ bool provisioning_configured(void)
 {
     return s_ssid[0] != '\0';
 }
+bool provisioning_active(void) {return s_ap_up;}
 
 esp_err_t provisioning_start(void)
 {
