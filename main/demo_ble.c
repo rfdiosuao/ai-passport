@@ -1,6 +1,7 @@
 // main/demo_ble.c —— NimBLE 广播示例；手机可扫描到 FoloPassport。
 #include "demo.h"
 #include "demo_radio.h"
+#include "ui_font.h"
 #include "ui_pixel.h"
 
 #include "esp_log.h"
@@ -222,13 +223,13 @@ static void tick(lv_timer_t *timer)
     (void)timer;
     switch (s_state) {
     case BLE_DEMO_STARTING:
-        lv_label_set_text(s_status, "Starting NimBLE...");
+        lv_label_set_text(s_status, "正在启动 NimBLE…");
         break;
     case BLE_DEMO_ADVERTISING:
-        lv_label_set_text(s_status, "ADVERTISING\n\nName: FoloPassport\n\nUse a BLE scanner\non your phone.\n\nOK: RESTART ADV");
+        lv_label_set_text(s_status, "正在广播\n\n名称: FoloPassport\n\n用手机上的蓝牙\n扫描器查找。\n\n确定=重新广播");
         break;
     case BLE_DEMO_FAILED:
-        lv_label_set_text_fmt(s_status, "BLE failed: %d", s_error);
+        lv_label_set_text_fmt(s_status, "蓝牙失败: %d", s_error);
         s_state = BLE_DEMO_OFF;
         break;
     default:
@@ -238,14 +239,15 @@ static void tick(lv_timer_t *timer)
 
 void demo_ble_enter(void)
 {
-    s_scr = ui_pixel_screen_create("BLUETOOTH LE");
+    s_scr = ui_pixel_screen_create_ex("蓝牙", ui_font_body(), "双击返回");
     lv_obj_t *panel = ui_pixel_panel_create(s_scr, 22, 58, 196, 180, UI_PAPER);
     s_status = lv_label_create(panel);
     lv_obj_set_width(s_status, 168);
+    lv_obj_set_style_text_font(s_status, ui_font_body(), 0);
     lv_obj_set_style_text_align(s_status, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(s_status, lv_color_hex(UI_INK), 0);
     lv_obj_center(s_status);
-    lv_label_set_text(s_status, "Starting NimBLE...");
+    lv_label_set_text(s_status, "正在启动 NimBLE…");
     ui_pixel_mascot_create(s_scr, 101, 244);
     s_timer = lv_timer_create(tick, 100, NULL);
     lv_screen_load(s_scr);

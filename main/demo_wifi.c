@@ -2,7 +2,9 @@
 #include "demo.h"
 #include "demo_radio.h"
 #include "bsp_display.h"
+#include "ui_font.h"
 #include "ui_pixel.h"
+#include "ui_text.h"
 
 #include "esp_event.h"
 #include "esp_log.h"
@@ -16,6 +18,15 @@
 static const char *TAG = "demo_wifi";
 
 #define WIFI_RESULT_COUNT 5
+
+// SSID 是任意用户内容:截断必须按"显示列数"而不是字节数,否则中文名要么少显示
+// 要么被切在字符中间产生非法 UTF-8。190px 的内容宽度在 16px 字体下约 23 个半角列,
+// 扣掉 RSSI 与信道占用的 7 列,留给名字 15 列(约 7 个汉字,超出部分显示 …)。
+// 完整覆盖范围见 assets/fonts/passport_cjk.chars.txt。
+#define WIFI_SSID_COLS 15
+
+// 表头:信号强度 / 名称 / 信道。重扫前会恢复成它。
+#define WIFI_HEADER "信号 名称 信道"
 
 typedef enum {
     WIFI_DEMO_OFF = 0,
@@ -121,7 +132,7 @@ static void show_scan_results(void)
     uint16_t total = 0;
     uint16_t count = WIFI_RESULT_COUNT;
     wifi_ap_record_t records[WIFI_RESULT_COUNT] = { 0 };
-    char text[320] = { 0 };
+    char text[512] = { 0 };
     size_t used = 0;
 
     esp_err_t err = esp_wifi_scan_get_ap_num(&total);
@@ -132,17 +143,24 @@ static void show_scan_results(void)
         return;
     }
 
-    for (uint16_t i = 0; i < count && used < sizeof(text); i++) {
+    for (uint16_t i = 0; i < count; i++) {
+        // 驱动给的是定长 33 字节字段,先落到本地并以 NUL 结尾再交给截断函数。
+        char raw[sizeof(records[i].ssid) + 1];
+        memcpy(raw, records[i].ssid, sizeof(records[i].ssid));
+        raw[sizeof(records[i].ssid)] = '\0';
+
+        char name[WIFI_SSID_COLS * 4 + 1];
+        ui_text_prefix_cols(raw, WIFI_SSID_COLS, name, sizeof(name));
+
         int written = snprintf(text + used, sizeof(text) - used,
-                               "%d  %.18s  ch%u\n",
-                               records[i].rssi, (const char *)records[i].ssid,
-                               records[i].primary);
+                               "%d %s ch%u\n",
+                               records[i].rssi, name, records[i].primary);
         if (written < 0 || (size_t)written >= sizeof(text) - used) break;
         used += (size_t)written;
     }
-    if (count == 0) snprintf(text, sizeof(text), "No access points found");
+    if (count == 0) snprintf(text, sizeof(text), "未发现热点");
 
-    lv_label_set_text_fmt(s_status, "%u APs  |  OK: RESCAN", total);
+    lv_label_set_text_fmt(s_status, "%u 个热点  |  确定=重扫", total);
     lv_label_set_text(s_results, text);
     s_state = WIFI_DEMO_OFF;
 }
@@ -152,16 +170,16 @@ static void tick(lv_timer_t *timer)
     (void)timer;
     switch (s_state) {
     case WIFI_DEMO_STARTING:
-        lv_label_set_text(s_status, "Starting Wi-Fi...");
+        lv_label_set_text(s_status, "正在启动无线…");
         break;
     case WIFI_DEMO_SCANNING:
-        lv_label_set_text(s_status, "Scanning 2.4 GHz...");
+        lv_label_set_text(s_status, "正在扫描 2.4G…");
         break;
     case WIFI_DEMO_READY:
         show_scan_results();
         break;
     case WIFI_DEMO_FAILED:
-        lv_label_set_text_fmt(s_status, "Wi-Fi failed: %s", esp_err_to_name(s_error));
+        lv_label_set_text_fmt(s_status, "无线失败: %s", esp_err_to_name(s_error));
         s_state = WIFI_DEMO_OFF;
         break;
     default:
@@ -200,21 +218,22 @@ esp_err_t demo_wifi_stop(void)
 
 void demo_wifi_enter(void)
 {
-    s_scr = ui_pixel_screen_create("WI-FI SCAN");
+    s_scr = ui_pixel_screen_create_ex("无线扫描", ui_font_body(), "双击返回");
     lv_obj_t *panel = ui_pixel_panel_create(s_scr, 12, 54, 216, 190, UI_PAPER);
 
     s_status = lv_label_create(panel);
     lv_obj_set_width(s_status, 190);
+    lv_obj_set_style_text_font(s_status, ui_font_body(), 0);
     lv_obj_set_style_text_color(s_status, lv_color_hex(UI_SKY_DARK), 0);
     lv_obj_align(s_status, LV_ALIGN_TOP_LEFT, 2, 2);
-    lv_label_set_text(s_status, "Starting Wi-Fi...");
+    lv_label_set_text(s_status, "正在启动无线…");
 
     s_results = lv_label_create(panel);
     lv_obj_set_width(s_results, 190);
-    lv_obj_set_style_text_font(s_results, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_font(s_results, ui_font_body(), 0);
     lv_obj_set_style_text_color(s_results, lv_color_hex(UI_INK), 0);
     lv_obj_align(s_results, LV_ALIGN_TOP_LEFT, 2, 35);
-    lv_label_set_text(s_results, "RSSI  SSID  CHANNEL");
+    lv_label_set_text(s_results, WIFI_HEADER);
 
     ui_pixel_mascot_create(s_scr, 101, 246);
     s_timer = lv_timer_create(tick, 100, NULL);
@@ -239,7 +258,7 @@ void demo_wifi_key(bsp_btn_t btn, bsp_btn_ev_t ev)
 {
     if (btn != BSP_BTN_OK || ev != BSP_BTN_CLICK || s_state != WIFI_DEMO_OFF) return;
     if (!bsp_lvgl_lock(250)) return;
-    lv_label_set_text(s_results, "RSSI  SSID  CHANNEL");
+    lv_label_set_text(s_results, WIFI_HEADER);
     bsp_lvgl_unlock();
     (void)start_scan();
 }

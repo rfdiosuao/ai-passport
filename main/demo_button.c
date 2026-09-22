@@ -3,6 +3,7 @@
 #include "demo.h"
 #include "bsp_button.h"
 #include "bsp_display.h"
+#include "ui_font.h"
 #include "ui_pixel.h"
 #include "lvgl.h"
 #include <stdio.h>
@@ -12,17 +13,17 @@ static lv_obj_t   *s_scr, *s_mv, *s_log;
 static lv_timer_t *s_timer;
 
 #define LOG_LINES 6
-static char s_lines[LOG_LINES][32];
+static char s_lines[LOG_LINES][40];
 static int  s_line_cnt;
 
-static const char *BTN_NAME[] = { "UP", "DOWN", "OK" };
-static const char *EV_NAME[]  = { "PRESS", "CLICK", "DOUBLE", "LONG" };
+static const char *BTN_NAME[] = { "上", "下", "确定" };
+static const char *EV_NAME[]  = { "按下", "单击", "双击", "长按" };
 
 // 每 100ms 刷新一次电压。lv_timer 跑在 LVGL 任务里,已持有锁,可直接操作对象。
 static void tick(lv_timer_t *t) {
     (void)t;
     int mv = bsp_button_read_mv();
-    if (mv < 0) lv_label_set_text(s_mv, "ADC read failed");
+    if (mv < 0) lv_label_set_text(s_mv, "读取失败");
     else        lv_label_set_text_fmt(s_mv, "%d mV", mv);
 }
 
@@ -34,7 +35,7 @@ static void log_push(const char *text) {
             memcpy(s_lines[i], s_lines[i + 1], sizeof(s_lines[0]));
         snprintf(s_lines[LOG_LINES - 1], sizeof(s_lines[0]), "%s", text);
     }
-    char all[LOG_LINES * 32 + 1] = { 0 };
+    char all[LOG_LINES * sizeof(s_lines[0]) + 1] = { 0 };
     for (int i = 0; i < s_line_cnt; i++) {
         strcat(all, s_lines[i]);
         if (i < s_line_cnt - 1) strcat(all, "\n");
@@ -44,19 +45,20 @@ static void log_push(const char *text) {
 
 void demo_button_enter(void) {
     s_line_cnt = 0;
-    s_scr = ui_pixel_screen_create("BUTTON / ADC");
+    s_scr = ui_pixel_screen_create_ex("按键 / ADC", ui_font_body(), "双击返回");
     lv_obj_t *panel = ui_pixel_panel_create(s_scr, 18, 58, 204, 184, UI_PAPER);
 
     s_mv = lv_label_create(panel);
-    lv_obj_set_style_text_font(s_mv, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_font(s_mv, ui_font_body(), 0);
     lv_obj_set_style_text_color(s_mv, lv_color_hex(UI_SKY_DARK), 0);
     lv_obj_align(s_mv, LV_ALIGN_TOP_MID, 0, 8);
     lv_label_set_text(s_mv, "-- mV");
 
     s_log = lv_label_create(panel);
+    lv_obj_set_style_text_font(s_log, ui_font_body(), 0);
     lv_obj_set_style_text_color(s_log, lv_color_hex(UI_INK), 0);
     lv_obj_align(s_log, LV_ALIGN_TOP_LEFT, 9, 54);
-    lv_label_set_text(s_log, "press any key...");
+    lv_label_set_text(s_log, "按任意键试试…");
 
     ui_pixel_mascot_create(s_scr, 101, 238);
 
@@ -72,7 +74,7 @@ void demo_button_exit(void) {
 void demo_button_key(bsp_btn_t btn, bsp_btn_ev_t ev) {
     if ((unsigned)btn >= sizeof(BTN_NAME) / sizeof(BTN_NAME[0]) ||
         (unsigned)ev >= sizeof(EV_NAME) / sizeof(EV_NAME[0])) return;
-    char line[32];
+    char line[sizeof(s_lines[0])];
     snprintf(line, sizeof(line), "%s: %s", BTN_NAME[btn], EV_NAME[ev]);
     if (!bsp_lvgl_lock(250)) return;
     log_push(line);

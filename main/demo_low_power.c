@@ -7,6 +7,7 @@
 #include "bsp_battery.h"
 #include "bsp_display.h"
 #include "bsp_i2c.h"
+#include "ui_font.h"
 #include "ui_pixel.h"
 
 #include "esp_attr.h"
@@ -174,31 +175,32 @@ static void sleep_task(void *arg)
 
 void demo_low_power_enter(void)
 {
-    s_scr = ui_pixel_screen_create("LOW POWER");
+    s_scr = ui_pixel_screen_create_ex("低功耗", ui_font_body(), "双击返回");
     lv_obj_t *panel = ui_pixel_panel_create(s_scr, 14, 54, 212, 190, UI_PAPER);
     s_status = lv_label_create(panel);
     lv_obj_set_width(s_status, 184);
+    lv_obj_set_style_text_font(s_status, ui_font_body(), 0);
     lv_obj_set_style_text_align(s_status, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(s_status, lv_color_hex(UI_INK), 0);
     lv_obj_align(s_status, LV_ALIGN_TOP_MID, 0, 1);
     if (s_deep_sleep_magic == DEEP_SLEEP_MAGIC &&
         esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER) {
         lv_label_set_text_fmt(s_status,
-                              "DEEP TIMER WAKE  #%lu\nUP/DOWN: SELECT  OK: RUN",
+                              "深睡定时唤醒 第%lu次\n上下=选择 确定=执行",
                               (unsigned long)s_deep_sleep_count);
     } else {
-        lv_label_set_text(s_status, "UP/DOWN: SELECT  OK: RUN\nRTC TIMER WAKE ONLY");
+        lv_label_set_text(s_status, "上下=选择 确定=执行\n仅支持定时器唤醒");
     }
 
     static const char *MODE_NAMES[] = {
-        "LIGHT SLEEP  |  2 SEC",
-        "DEEP SLEEP   |  5 SEC",
+        "浅睡 2 秒",
+        "深睡 5 秒",
     };
     for (int i = 0; i < 2; i++) {
         s_mode_cards[i] = ui_pixel_panel_create(panel, 7, 56 + i * 54,
                                                  176, 42, UI_PAPER);
         lv_obj_t *label = lv_label_create(s_mode_cards[i]);
-        lv_obj_set_style_text_font(label, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_font(label, ui_font_body(), 0);
         lv_obj_set_style_text_color(label, lv_color_hex(UI_INK), 0);
         lv_label_set_text(label, MODE_NAMES[i]);
         lv_obj_center(label);
@@ -219,14 +221,14 @@ esp_err_t demo_low_power_start(void)
     }
     s_stopped = xSemaphoreCreateBinary();
     if (!s_stopped) {
-        set_status("Cannot create\nsleep worker");
+        set_status("无法创建休眠任务");
         return ESP_ERR_NO_MEM;
     }
     s_stop_requested = false;
     if (xTaskCreate(sleep_task, "demo_sleep", 3072, NULL, 4, &s_task) != pdPASS) {
         vSemaphoreDelete(s_stopped);
         s_stopped = NULL;
-        set_status("Cannot create\nsleep worker");
+        set_status("无法创建休眠任务");
         ESP_LOGE(TAG, "创建 light-sleep 任务失败");
         return ESP_ERR_NO_MEM;
     }

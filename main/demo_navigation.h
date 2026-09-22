@@ -8,6 +8,9 @@ typedef enum {
     DEMO_NAV_INPUT_UP_CLICK,
     DEMO_NAV_INPUT_DOWN_CLICK,
     DEMO_NAV_INPUT_OK_CLICK,
+    // 演示页内双击"确定"= 返回菜单,与长按等效。做成两个入口是因为
+    // 长按在单手操作时不好按,双击更容易被发现和使用。
+    DEMO_NAV_INPUT_OK_DOUBLE,
     DEMO_NAV_INPUT_OK_LONG,
 } demo_nav_input_t;
 

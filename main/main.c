@@ -3,7 +3,9 @@
 // 按键语义(全局统一):
 //   上/下 短按   菜单中=移动选中项;演示页中=该页自定义
 //   确定  短按   菜单中=进入选中项;演示页中=该页自定义
-//   确定  长按   演示页中=返回菜单(由本文件统一拦截)
+//   确定  双击   演示页中=返回菜单
+//   确定  长按   演示页中=返回菜单(与双击等效,留一条更好按的备用路径)
+// 界面文案为简体中文,由 passport_cjk_16 绘制(见 ui_font.c)。
 #include "bsp_i2c.h"
 #include "bsp_display.h"
 #include "bsp_button.h"
@@ -12,6 +14,7 @@
 #include "bsp_pins.h"      // 错误日志里要打印 BSP_LCD_* 引脚号
 #include "demo.h"
 #include "demo_navigation.h"
+#include "ui_font.h"
 #include "ui_pixel.h"
 #include "lvgl.h"
 #include "esp_log.h"
@@ -23,19 +26,19 @@
 static const char *TAG = "main";
 
 static const demo_entry_t DEMOS[] = {
-    { .name = "Display", .enter = demo_display_enter, .exit = demo_display_exit,
+    { .name = "显示", .enter = demo_display_enter, .exit = demo_display_exit,
       .key = demo_display_key },
-    { .name = "Button", .enter = demo_button_enter, .exit = demo_button_exit,
+    { .name = "按键", .enter = demo_button_enter, .exit = demo_button_exit,
       .key = demo_button_key },
-    { .name = "Audio", .enter = demo_audio_enter, .exit = demo_audio_exit,
+    { .name = "音频", .enter = demo_audio_enter, .exit = demo_audio_exit,
       .key = demo_audio_key, .start = demo_audio_start, .stop = demo_audio_stop },
-    { .name = "Battery", .enter = demo_battery_enter, .exit = demo_battery_exit,
+    { .name = "电池", .enter = demo_battery_enter, .exit = demo_battery_exit,
       .key = demo_battery_key },
-    { .name = "Wi-Fi", .enter = demo_wifi_enter, .exit = demo_wifi_exit,
+    { .name = "无线", .enter = demo_wifi_enter, .exit = demo_wifi_exit,
       .key = demo_wifi_key, .start = demo_wifi_start, .stop = demo_wifi_stop },
-    { .name = "BLE", .enter = demo_ble_enter, .exit = demo_ble_exit,
+    { .name = "蓝牙", .enter = demo_ble_enter, .exit = demo_ble_exit,
       .key = demo_ble_key, .start = demo_ble_start, .stop = demo_ble_stop },
-    { .name = "Low Power", .enter = demo_low_power_enter, .exit = demo_low_power_exit,
+    { .name = "低功耗", .enter = demo_low_power_enter, .exit = demo_low_power_exit,
       .key = demo_low_power_key, .start = demo_low_power_start, .stop = demo_low_power_stop },
 };
 #define DEMO_COUNT (sizeof(DEMOS) / sizeof(DEMOS[0]))
@@ -62,7 +65,7 @@ static void menu_refresh(void) {
     for (size_t i = 0; i < DEMO_COUNT; i++) {
         lv_label_set_text_fmt(s_rows[i], "%s%s",
                               DEMOS[i].name,
-                              s_ok[i] ? "" : "  [FAIL]");
+                              s_ok[i] ? "" : " 失败");
         ui_pixel_set_selected(s_cards[i], i == s_navigation.selected, s_ok[i]);
         lv_obj_set_style_text_color(s_rows[i],
             s_ok[i] ? lv_color_hex(UI_INK) : lv_color_hex(0x7A2020), 0);
@@ -70,14 +73,15 @@ static void menu_refresh(void) {
 }
 
 static void menu_build(void) {
-    s_menu_scr = ui_pixel_screen_create("FoloToy");
+    // 品牌名保留拉丁文用标题字体;其余中文文案由 ui_font_body() 绘制。
+    s_menu_scr = ui_pixel_screen_create_ex("FoloToy", ui_font_title(), "上下选择 确定进入");
 
     for (size_t i = 0; i < DEMO_COUNT; i++) {
         int x = 11 + (int)(i % 2) * 112;
         int y = 52 + (int)(i / 2) * 47;
         s_cards[i] = ui_pixel_panel_create(s_menu_scr, x, y, 102, 40, UI_PAPER);
         s_rows[i] = lv_label_create(s_cards[i]);
-        lv_obj_set_style_text_font(s_rows[i], &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_font(s_rows[i], ui_font_body(), 0);
         lv_obj_set_style_text_align(s_rows[i], LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_center(s_rows[i]);
     }
@@ -93,7 +97,9 @@ static void enter_menu(void) {
 }
 
 static demo_nav_input_t navigation_input(bsp_btn_t btn, bsp_btn_ev_t event) {
-    if (event == BSP_BTN_LONG && btn == BSP_BTN_OK) return DEMO_NAV_INPUT_OK_LONG;
+    // 只把"确定"的双击/长按翻译成返回;上/下的双击仍是页面自定义事件。
+    if (btn == BSP_BTN_OK && event == BSP_BTN_DOUBLE) return DEMO_NAV_INPUT_OK_DOUBLE;
+    if (btn == BSP_BTN_OK && event == BSP_BTN_LONG) return DEMO_NAV_INPUT_OK_LONG;
     if (event != BSP_BTN_CLICK) return DEMO_NAV_INPUT_OTHER;
     if (btn == BSP_BTN_UP) return DEMO_NAV_INPUT_UP_CLICK;
     if (btn == BSP_BTN_DOWN) return DEMO_NAV_INPUT_DOWN_CLICK;
@@ -124,7 +130,9 @@ static void process_input(const input_event_t *input) {
         return;
     }
 
-    if (nav_input == DEMO_NAV_INPUT_OTHER || nav_input == DEMO_NAV_INPUT_OK_LONG) return;
+    // 菜单里"确定"双击/长按没有语义,直接忽略,避免落到页面事件里。
+    if (nav_input == DEMO_NAV_INPUT_OTHER || nav_input == DEMO_NAV_INPUT_OK_LONG ||
+        nav_input == DEMO_NAV_INPUT_OK_DOUBLE) return;
     if (!bsp_lvgl_lock(500)) return;
     demo_nav_result_t result = demo_navigation_handle(
         &s_navigation, nav_input, s_ok[s_navigation.selected]);
@@ -209,6 +217,8 @@ void app_main(void) {
         return;
     }
     bsp_display_backlight(100);
+    // 必须在创建任何控件之前初始化字体,否则控件会绑定到没有中文字形的默认字体。
+    ui_font_init();
 
     demo_navigation_init(&s_navigation, DEMO_COUNT);
 

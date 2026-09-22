@@ -14,6 +14,10 @@
 #define UI_MUTED      0xD9E7EC
 
 lv_obj_t *ui_pixel_screen_create(const char *title);
+// 扩展版:可指定标题字体,并在左下角画一行操作提示(hint 为 NULL 时不画)。
+// 中文标题请传 ui_font_body(),拉丁文/品牌名可继续用 ui_font_title()。
+lv_obj_t *ui_pixel_screen_create_ex(const char *title, const lv_font_t *title_font,
+                                    const char *hint);
 lv_obj_t *ui_pixel_panel_create(lv_obj_t *parent, int x, int y, int w, int h,
                                 uint32_t color);
 lv_obj_t *ui_pixel_label(lv_obj_t *parent, const char *text,

@@ -6,6 +6,7 @@
 #include "demo.h"
 #include "bsp_audio.h"
 #include "bsp_display.h"   // bsp_lvgl_lock / bsp_lvgl_unlock(音频任务里操作 LVGL 要加锁)
+#include "ui_font.h"
 #include "ui_pixel.h"
 #include "lvgl.h"
 #include "freertos/FreeRTOS.h"
@@ -43,12 +44,12 @@ static void set_status(const char *text) {
 }
 
 static void play_tone(void) {
-    set_status("playing 1kHz...");
-    if (bsp_audio_set_format(SAMPLE_RATE, 16, 1) != ESP_OK) { set_status("format failed"); return; }
+    set_status("正在播放 1kHz…");
+    if (bsp_audio_set_format(SAMPLE_RATE, 16, 1) != ESP_OK) { set_status("设置格式失败"); return; }
     bsp_audio_set_volume(80);
 
     int16_t *buf = malloc(CHUNK_SAMPLES * sizeof(int16_t));
-    if (!buf) { set_status("out of memory"); return; }
+    if (!buf) { set_status("内存不足"); return; }
 
     const int period = SAMPLE_RATE / TONE_HZ;        // 每个方波周期的采样数
     int total = SAMPLE_RATE * TONE_MS / 1000;
@@ -60,17 +61,17 @@ static void play_tone(void) {
             if (++phase >= period) phase = 0;
         }
         if (bsp_audio_write(buf, (size_t)n * sizeof(int16_t)) != ESP_OK) {
-            set_status("playback failed");
+            set_status("播放失败");
             break;
         }
         total -= n;
     }
     free(buf);
-    if (!s_cancel && total == 0) set_status("done. OK: tone  UP: record");
+    if (!s_cancel && total == 0) set_status("完成。确定=音 上=录放");
 }
 
 static void record_and_play(void) {
-    if (bsp_audio_set_format(SAMPLE_RATE, 16, 1) != ESP_OK) { set_status("format failed"); return; }
+    if (bsp_audio_set_format(SAMPLE_RATE, 16, 1) != ESP_OK) { set_status("设置格式失败"); return; }
 
     size_t total = (size_t)SAMPLE_RATE * RECORD_SEC;
     int16_t *rec = malloc(total * sizeof(int16_t));   // 3s @16k 16bit = 96KB
@@ -78,37 +79,37 @@ static void record_and_play(void) {
         // C3 无 PSRAM,96KB 可能分配不到 —— 明确告知而不是静默失败
         ESP_LOGE(TAG, "录音缓冲 %u 字节分配失败(C3 内存紧张,可缩短 RECORD_SEC)",
                  (unsigned)(total * sizeof(int16_t)));
-        set_status("record buffer alloc failed");
+        set_status("录音缓冲申请失败");
         return;
     }
 
-    set_status("recording 3s... speak now");
+    set_status("录音 3 秒…请说话");
     size_t got = 0;
     while (got < total && !s_cancel) {
         size_t n = (total - got) < CHUNK_SAMPLES ? (total - got) : CHUNK_SAMPLES;
         if (bsp_audio_read(rec + got, n * sizeof(int16_t)) != ESP_OK) {
             free(rec);
-            if (!s_cancel) set_status("recording failed");
+            if (!s_cancel) set_status("录音失败");
             return;
         }
         got += n;
     }
 
     if (!s_cancel) {
-        set_status("playing back...");
+        set_status("正在回放…");
         bsp_audio_set_volume(80);
     }
     size_t played = 0;
     while (played < got && !s_cancel) {
         size_t n = (got - played) < CHUNK_SAMPLES ? (got - played) : CHUNK_SAMPLES;
         if (bsp_audio_write(rec + played, n * sizeof(int16_t)) != ESP_OK) {
-            set_status("playback failed");
+            set_status("播放失败");
             break;
         }
         played += n;
     }
     free(rec);
-    if (!s_cancel && got == total && played == total) set_status("done. OK: tone  UP: record");
+    if (!s_cancel && got == total && played == total) set_status("完成。确定=音 上=录放");
 }
 
 static void audio_task(void *arg) {
@@ -128,7 +129,7 @@ static void audio_task(void *arg) {
 }
 
 void demo_audio_enter(void) {
-    s_scr = ui_pixel_screen_create("AUDIO");
+    s_scr = ui_pixel_screen_create_ex("音频", ui_font_body(), "双击返回");
     lv_obj_t *panel = ui_pixel_panel_create(s_scr, 18, 62, 204, 168, UI_PAPER);
 
     lv_obj_t *record = ui_pixel_panel_create(panel, 58, 12, 72, 72, UI_INK);
@@ -140,11 +141,12 @@ void demo_audio_enter(void) {
     lv_obj_center(disc);
 
     s_status = lv_label_create(panel);
+    lv_obj_set_style_text_font(s_status, ui_font_body(), 0);
     lv_obj_set_style_text_color(s_status, lv_color_hex(UI_INK), 0);
     lv_obj_set_style_text_align(s_status, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(s_status, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(s_status, 176);
-    lv_label_set_text(s_status, "OK: 1kHz TONE\nUP: RECORD + PLAY");
+    lv_label_set_text(s_status, "确定: 1kHz 提示音\n上: 录音并回放");
     lv_obj_align(s_status, LV_ALIGN_BOTTOM_MID, 0, -9);
 
     s_mascot = ui_pixel_mascot_create(s_scr, 101, 238);
@@ -160,14 +162,14 @@ esp_err_t demo_audio_start(void) {
     }
     s_stopped = xSemaphoreCreateBinary();
     if (!s_stopped) {
-        set_status("Cannot create audio worker");
+        set_status("无法创建音频任务");
         return ESP_ERR_NO_MEM;
     }
     s_cancel = false;
     if (xTaskCreate(audio_task, "demo_audio", 4096, NULL, 4, &s_task) != pdPASS) {
         vSemaphoreDelete(s_stopped);
         s_stopped = NULL;
-        set_status("Cannot create audio worker");
+        set_status("无法创建音频任务");
         return ESP_ERR_NO_MEM;
     }
     return ESP_OK;
@@ -187,7 +189,7 @@ esp_err_t demo_audio_stop(void) {
     xTaskNotify(task, AUDIO_COMMAND_STOP, eSetValueWithOverwrite);
     if (!s_stopped ||
         xSemaphoreTake(s_stopped, pdMS_TO_TICKS(AUDIO_STOP_TIMEOUT_MS)) != pdTRUE) {
-        set_status("Audio stop timed out; retry");
+        set_status("音频停止超时,请重试");
         return ESP_ERR_TIMEOUT;
     }
     vTaskDelete(task);

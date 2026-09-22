@@ -1,5 +1,7 @@
 #include "ui_pixel.h"
 
+#include "ui_font.h"   // 中文字体:标题与操作提示都用它画
+
 static void start_blink(lv_obj_t *eye);
 
 static lv_obj_t *block(lv_obj_t *parent, int x, int y, int w, int h, uint32_t color)
@@ -33,7 +35,8 @@ static void add_cloud(lv_obj_t *parent, int x, int y)
     block(parent, x + 27, y + 1, 9, 8, 0xFFFFFF);
 }
 
-lv_obj_t *ui_pixel_screen_create(const char *title)
+lv_obj_t *ui_pixel_screen_create_ex(const char *title, const lv_font_t *title_font,
+                                    const char *hint)
 {
     lv_obj_t *scr = lv_obj_create(NULL);
     lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
@@ -53,9 +56,23 @@ lv_obj_t *ui_pixel_screen_create(const char *title)
     lv_obj_t *plate = block(scr, 5, 8, 151, 33, UI_PAPER);
     lv_obj_set_style_border_color(plate, lv_color_hex(UI_INK), 0);
     lv_obj_set_style_border_width(plate, 3, 0);
-    lv_obj_t *heading = ui_pixel_label(plate, title, &lv_font_montserrat_20, UI_INK);
+    lv_obj_t *heading = ui_pixel_label(plate, title,
+                                      title_font ? title_font : ui_font_title(), UI_INK);
     lv_obj_center(heading);
+
+    /* 操作提示固定在左下角(吉祥物占 x>=101),宽度上限 90px 以免压到它。 */
+    if (hint) {
+        lv_obj_t *tip = ui_pixel_label(scr, hint, ui_font_body(), UI_INK);
+        lv_obj_set_pos(tip, 8, 261);
+        lv_obj_set_width(tip, 90);
+        lv_label_set_long_mode(tip, LV_LABEL_LONG_DOT);
+    }
     return scr;
+}
+
+lv_obj_t *ui_pixel_screen_create(const char *title)
+{
+    return ui_pixel_screen_create_ex(title, ui_font_title(), NULL);
 }
 
 lv_obj_t *ui_pixel_panel_create(lv_obj_t *parent, int x, int y, int w, int h,

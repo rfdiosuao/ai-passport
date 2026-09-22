@@ -1,6 +1,7 @@
 // main/demo_battery.c —— CW2017 电量与电压,每秒刷新。
 #include "demo.h"
 #include "bsp_battery.h"
+#include "ui_font.h"
 #include "ui_pixel.h"
 #include "lvgl.h"
 
@@ -16,8 +17,8 @@ static void tick(lv_timer_t *t) {
     if (soc < 0) lv_label_set_text(s_soc, "-- %");
     else         lv_label_set_text_fmt(s_soc, "%d %%", soc);
 
-    if (mv < 0)  lv_label_set_text(s_mv, "-- mV");
-    else         lv_label_set_text_fmt(s_mv, "%d mV", mv);
+    if (mv < 0)  lv_label_set_text(s_mv, "-- 毫伏");
+    else         lv_label_set_text_fmt(s_mv, "%d 毫伏", mv);
 
     // 低电量变红,便于一眼判断
     lv_obj_set_style_text_color(s_soc,
@@ -25,19 +26,20 @@ static void tick(lv_timer_t *t) {
 }
 
 void demo_battery_enter(void) {
-    s_scr = ui_pixel_screen_create("BATTERY");
+    s_scr = ui_pixel_screen_create_ex("电池", ui_font_body(), "双击返回");
     lv_obj_t *panel = ui_pixel_panel_create(s_scr, 24, 67, 192, 157, UI_YELLOW);
 
     s_soc = lv_label_create(panel);
-    lv_obj_set_style_text_font(s_soc, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_font(s_soc, ui_font_body(), 0);
     lv_obj_set_style_text_color(s_soc, lv_color_hex(UI_INK), 0);
     lv_obj_align(s_soc, LV_ALIGN_TOP_MID, 0, 18);
     lv_label_set_text(s_soc, "-- %");
 
     s_mv = lv_label_create(panel);
+    lv_obj_set_style_text_font(s_mv, ui_font_body(), 0);
     lv_obj_set_style_text_color(s_mv, lv_color_hex(UI_INK), 0);
     lv_obj_align(s_mv, LV_ALIGN_TOP_MID, 0, 52);
-    lv_label_set_text(s_mv, "-- mV");
+    lv_label_set_text(s_mv, "-- 毫伏");
 
     lv_obj_t *battery = ui_pixel_panel_create(panel, 38, 91, 100, 38, UI_GRASS);
     lv_obj_set_style_border_width(battery, 4, 0);

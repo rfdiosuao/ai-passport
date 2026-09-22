@@ -14,7 +14,8 @@ demo_nav_result_t demo_navigation_handle(demo_navigation_t *navigation,
 
     if (navigation->active >= 0) {
         result.index = (size_t)navigation->active;
-        result.action = input == DEMO_NAV_INPUT_OK_LONG
+        // 演示页内:双击或长按"确定"都返回菜单,其余事件交给页面自己处理。
+        result.action = (input == DEMO_NAV_INPUT_OK_LONG || input == DEMO_NAV_INPUT_OK_DOUBLE)
                       ? DEMO_NAV_ACTION_EXIT
                       : DEMO_NAV_ACTION_FORWARD;
         return result;

@@ -34,5 +34,15 @@ int main(void) {
 
     demo_navigation_complete_exit(&navigation);
     assert(navigation.active == -1);
+
+    // 双击"确定"与长按等效,也返回菜单。
+    result = demo_navigation_handle(&navigation, DEMO_NAV_INPUT_OK_CLICK, true);
+    assert(result.action == DEMO_NAV_ACTION_ENTER);
+    assert(navigation.active == 0);
+    result = demo_navigation_handle(&navigation, DEMO_NAV_INPUT_OK_DOUBLE, true);
+    assert(result.action == DEMO_NAV_ACTION_EXIT);
+    assert(navigation.active == 0);
+    demo_navigation_complete_exit(&navigation);
+    assert(navigation.active == -1);
     return 0;
 }
