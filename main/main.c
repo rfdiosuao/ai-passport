@@ -14,6 +14,7 @@
 #include "bsp_pins.h"      // 错误日志里要打印 BSP_LCD_* 引脚号
 #include "demo.h"
 #include "demo_navigation.h"
+#include "provisioning.h"
 #include "ui_font.h"
 #include "ui_pixel.h"
 #include "lvgl.h"
@@ -40,6 +41,8 @@ static const demo_entry_t DEMOS[] = {
       .key = demo_ble_key, .start = demo_ble_start, .stop = demo_ble_stop },
     { .name = "低功耗", .enter = demo_low_power_enter, .exit = demo_low_power_exit,
       .key = demo_low_power_key, .start = demo_low_power_start, .stop = demo_low_power_stop },
+    { .name = "配网", .enter = demo_provisioning_enter, .exit = demo_provisioning_exit,
+      .key = demo_provisioning_key, .start = demo_provisioning_start, .stop = demo_provisioning_stop },
 };
 #define DEMO_COUNT (sizeof(DEMOS) / sizeof(DEMOS[0]))
 #define INPUT_QUEUE_DEPTH 8
@@ -221,6 +224,10 @@ void app_main(void) {
     ui_font_init();
 
     demo_navigation_init(&s_navigation, DEMO_COUNT);
+    // 读取已存 Wi-Fi/铭牌配置(决定首启是否提示配网)。失败不阻塞其它功能。
+    if (provisioning_init() != ESP_OK) {
+        ESP_LOGW(TAG, "配网初始化失败(可能无 NVS 分区)");
+    }
 
     // 其余外设单项失败不阻塞:菜单里标 [FAIL],其他项照常可测。
     s_ok[0] = true;                                   // Display 已确认可用
@@ -240,6 +247,7 @@ void app_main(void) {
     s_ok[4] = true;                                    // 页面内按需初始化并显示错误
     s_ok[5] = true;
     s_ok[6] = true;
+    s_ok[7] = true;                                    // 配网:SoftAP 按需启动
 
     if (bsp_lvgl_lock(1000)) {
         enter_menu();

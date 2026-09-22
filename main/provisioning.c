@@ -1,0 +1,370 @@
+// main/provisioning.c —— SoftAP 本地配网实现(固件 UX §1)。
+//
+// 只依赖 esp_wifi / esp_http_server / nvs_flash,不碰 LVGL。
+// 热点名 SUMMON-xxxx、密码 8 位十六进制,均从芯片 MAC 派生,每台设备不同。
+#include "provisioning.h"
+
+#include "esp_event.h"
+#include "esp_http_server.h"
+#include "esp_log.h"
+#include "esp_mac.h"
+#include "esp_netif.h"
+#include "esp_wifi.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "nvs.h"
+#include "nvs_flash.h"
+#include <stdio.h>
+#include <string.h>
+
+static const char *TAG = "prov";
+
+#define NVS_NS "summon"
+#define NVS_KEY_SSID "ssid"
+#define NVS_KEY_PASS "pass"
+#define NVS_KEY_NAME "nameplate"
+#define AP_IP "192.168.4.1"
+#define CONNECT_TIMEOUT_MS 20000
+
+static bool s_nvs_ready;
+static bool s_netif_ready;
+static bool s_event_ready;
+static bool s_wifi_init;
+static bool s_ap_up;
+static httpd_handle_t s_server;
+static esp_netif_t *s_ap_netif;
+static esp_netif_t *s_sta_netif;
+static esp_event_handler_instance_t s_wifi_evt;
+static esp_event_handler_instance_t s_ip_evt;
+
+static volatile provisioning_state_t s_state = PROV_IDLE;
+static char s_ap_ssid[16];
+static char s_ap_pass[16];
+static char s_nameplate[64];
+static char s_ssid[33];
+static char s_pass[65];
+
+// ---------------------------------------------------------------- NVS 存取
+static esp_err_t nvs_open_rw(nvs_handle_t *h)
+{
+    esp_err_t err = nvs_flash_init();
+    if (err != ESP_OK) {
+        // 只有空/损坏分区才擦除;正常情况下这是首启。
+        ESP_LOGW(TAG, "NVS 需擦除重试: %s", esp_err_to_name(err));
+        err = nvs_flash_erase();
+        if (err == ESP_OK) err = nvs_flash_init();
+    }
+    if (err != ESP_OK) return err;
+    return nvs_open(NVS_NS, NVS_READWRITE, h);
+}
+
+static void nvs_read_str(const char *key, char *out, size_t out_len)
+{
+    nvs_handle_t h;
+    if (nvs_open_rw(&h) != ESP_OK) return;
+    size_t len = out_len;
+    if (nvs_get_str(h, key, out, &len) != ESP_OK) out[0] = '\0';
+    nvs_close(h);
+}
+
+static esp_err_t nvs_write_str(const char *key, const char *value)
+{
+    nvs_handle_t h;
+    esp_err_t err = nvs_open_rw(&h);
+    if (err != ESP_OK) return err;
+    err = nvs_set_str(h, key, value ? value : "");
+    nvs_close(h);
+    return err;
+}
+
+// ---------------------------------------------------------------- 凭据派生
+static void derive_ap_credentials(void)
+{
+    uint8_t mac[6] = { 0 };
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    snprintf(s_ap_ssid, sizeof(s_ap_ssid), "SUMMON-%02X%02X%02X%02X",
+             mac[2], mac[3], mac[4], mac[5]);
+    snprintf(s_ap_pass, sizeof(s_ap_pass), "%02X%02X%02X%02X",
+             mac[2], mac[3], mac[4], mac[5]);
+}
+
+// ---------------------------------------------------------------- Wi-Fi 事件
+static void wifi_event_handler(void *arg, esp_event_base_t base, int32_t id, void *data)
+{
+    (void)arg; (void)base;
+    if (id == WIFI_EVENT_STA_DISCONNECTED) {
+        if (s_state == PROV_CONNECTING || s_state == PROV_CONNECTED) {
+            ESP_LOGW(TAG, "目标网络断开");
+            if (s_state == PROV_CONNECTING) s_state = PROV_WIFI_FAILED;
+        }
+    }
+}
+
+static void ip_event_handler(void *arg, esp_event_base_t base, int32_t id, void *data)
+{
+    (void)arg; (void)base; (void)data;
+    if (id == IP_EVENT_STA_GOT_IP) {
+        s_state = PROV_CONNECTED;
+    }
+}
+
+// ---------------------------------------------------------------- httpd 页面
+static const char INDEX_PAGE[] =
+"<!doctype html><html lang=zh><meta charset=utf-8>"
+"<meta name=viewport content='width=device-width,initial-scale=1'>"
+"<title>SUMMON 配网</title><style>"
+"body{font-family:system-ui,sans-serif;background:#0b0c0a;color:#e7e9e4;margin:0;padding:16px}"
+".card{max-width:420px;margin:0 auto;background:#171a1d;border-radius:14px;padding:18px}"
+"h1{font-size:18px;margin:0 0 12px}label{display:block;font-size:13px;margin:14px 0 4px;color:#9aa4ad}"
+"input{box-sizing:border-box;width:100%;padding:10px;border:1px solid #2c3338;border-radius:8px;background:#0f1113;color:#e7e9e4;font-size:15px}"
+".row{display:flex;gap:8px}.row input{flex:1}button{background:#1689e8;color:#fff;border:0;border-radius:8px;padding:10px 14px;font-size:14px}"
+"#msg{margin-top:14px;font-size:14px;min-height:20px}#msg.ok{color:#82be2d}#msg.err{color:#e43b2f}"
+"</style><div class=card><h1>SUMMON 设备配网</h1>"
+"<label>目标 Wi-Fi 名称 (SSID)</label>"
+"<div class=row><input id=ssid placeholder='手动输入或扫描'><button id=scan>扫描</button></div>"
+"<label>密码</label><div class=row><input id=pass type=password placeholder='Wi-Fi 密码'><button id=toggle>显示</button></div>"
+"<label>Agent 铭牌</label><input id=nameplate placeholder='可选'>"
+"<button id=save style='width:100%;margin-top:18px'>保存并连接</button>"
+"<div id=msg></div></div>"
+"<script>"
+"var $=function(i){return document.getElementById(i)};"
+"function msg(t,ok){var m=$('msg');m.textContent=t;m.className=ok?'ok':'err'}"
+"$('toggle').onclick=function(){var p=$('pass');p.type=p.type==='password'?'text':'password';this.textContent=p.type==='password'?'显示':'隐藏'}"
+"$('scan').onclick=function(){this.disabled=true;msg('扫描中…');fetch('/scan').then(r=>r.json()).then(function(a){"
+"if(!a.length){msg('未发现热点');return}"
+"var d=document.createElement('select');d.id='apd';d.style.cssText='box-sizing:border-box;width:100%;padding:10px;margin-top:6px;border:1px solid #2c3338;border-radius:8px;background:#0f1113;color:#e7e9e4';"
+"a.forEach(function(x){var o=document.createElement('option');o.textContent=x.ssid+' ('+x.rssi+'dBm)';o.value=x.ssid;d.appendChild(o)});"
+"var s=$('ssid');s.parentNode.insertBefore(d,s.nextSibling);d.onchange=function(){s.value=this.value;this.remove()};msg('选一个热点')"
+"}).catch(function(){msg('扫描失败')}).finally(function(){$('scan').disabled=false})}"
+"$('save').onclick=function(){this.disabled=true;msg('保存中…');"
+"var body=new URLSearchParams();body.set('ssid',$('ssid').value);body.set('pass',$('pass').value);body.set('nameplate',$('nameplate').value);"
+"fetch('/save',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body}).then(r=>r.json()).then(function(j){"
+"msg(j.ok?('已连接: '+j.ip):('失败: '+j.message),j.ok)}).catch(function(){msg('请求失败')}).finally(function(){$('save').disabled=false})}"
+"</script>";
+
+static esp_err_t http_get_index(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "text/html");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, INDEX_PAGE, HTTPD_RESP_USE_STRLEN);
+}
+
+static esp_err_t http_get_scan(httpd_req_t *req)
+{
+    wifi_ap_record_t aps[16];
+    uint16_t count = 16;
+    esp_err_t err = esp_wifi_scan_start(NULL, true);
+    if (err == ESP_OK) err = esp_wifi_scan_get_ap_records(&count, aps);
+
+    char body[2048] = "[";
+    size_t used = 1;
+    for (uint16_t i = 0; i < count; i++) {
+        char ssid[34] = { 0 };
+        memcpy(ssid, aps[i].ssid, sizeof(aps[i].ssid) < 33 ? sizeof(aps[i].ssid) : 32);
+        int w = snprintf(body + used, sizeof(body) - used, "%s{\"ssid\":\"%s\",\"rssi\":%d}",
+                         used > 1 ? "," : "", ssid, aps[i].rssi);
+        if (w < 0 || (size_t)w >= sizeof(body) - used) break;
+        used += (size_t)w;
+    }
+    snprintf(body + used, sizeof(body) - used, "]");
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);
+}
+
+static esp_err_t http_get_status(httpd_req_t *req)
+{
+    char body[320];
+    snprintf(body, sizeof(body),
+             "{\"configured\":%s,\"state\":\"%s\",\"ssid\":\"%s\",\"nameplate\":\"%s\"}",
+             provisioning_configured() ? "true" : "false",
+             s_state == PROV_CONNECTED ? "connected" : "provisioning",
+             s_ssid, s_nameplate);
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);
+}
+
+static esp_err_t connect_sta(const char *ssid, const char *pass)
+{
+    wifi_config_t cfg = { 0 };
+    strncpy((char *)cfg.sta.ssid, ssid, sizeof(cfg.sta.ssid) - 1);
+    strncpy((char *)cfg.sta.password, pass, sizeof(cfg.sta.password) - 1);
+    cfg.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
+    cfg.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+
+    esp_err_t err = esp_wifi_set_mode(WIFI_MODE_APSTA);
+    if (err != ESP_OK) return err;
+    err = esp_wifi_set_config(WIFI_IF_STA, &cfg);
+    if (err != ESP_OK) return err;
+
+    s_state = PROV_CONNECTING;
+    err = esp_wifi_connect();
+    if (err != ESP_OK) return err;
+
+    // 轮询等待结果(配网页是短生命周期操作,阻塞可接受)。
+    for (int i = 0; i < CONNECT_TIMEOUT_MS / 100; i++) {
+        if (s_state == PROV_CONNECTED) return ESP_OK;
+        if (s_state == PROV_WIFI_FAILED) return ESP_FAIL;
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    esp_wifi_disconnect();
+    return ESP_ERR_TIMEOUT;
+}
+
+static esp_err_t http_post_save(httpd_req_t *req)
+{
+    char buf[320] = { 0 };
+    int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    if (len <= 0) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "empty body");
+        return ESP_OK;
+    }
+    buf[len] = '\0';
+
+    char ssid[33] = { 0 }, pass[65] = { 0 }, nameplate[64] = { 0 };
+    char *save = NULL;
+    for (char *tok = strtok_r(buf, "&", &save); tok; tok = strtok_r(NULL, "&", &save)) {
+        char *eq = strchr(tok, '=');
+        if (!eq) continue;
+        *eq = '\0';
+        char *val = eq + 1;
+        if (strcmp(tok, "ssid") == 0) snprintf(ssid, sizeof(ssid), "%s", val);
+        else if (strcmp(tok, "pass") == 0) snprintf(pass, sizeof(pass), "%s", val);
+        else if (strcmp(tok, "nameplate") == 0) snprintf(nameplate, sizeof(nameplate), "%s", val);
+    }
+    if (ssid[0] == '\0') {
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_send(req, "{\"ok\":false,\"message\":\"SSID 不能为空\"}", HTTPD_RESP_USE_STRLEN);
+        return ESP_OK;
+    }
+
+    esp_err_t err = connect_sta(ssid, pass);
+    char body[320];
+    if (err == ESP_OK) {
+        // 验证成功才原子提交,坏配置不覆盖旧值。
+        nvs_write_str(NVS_KEY_SSID, ssid);
+        nvs_write_str(NVS_KEY_PASS, pass);
+        if (nameplate[0]) nvs_write_str(NVS_KEY_NAME, nameplate);
+        strncpy(s_ssid, ssid, sizeof(s_ssid) - 1);
+        strncpy(s_pass, pass, sizeof(s_pass) - 1);
+        strncpy(s_nameplate, nameplate, sizeof(s_nameplate) - 1);
+        esp_netif_ip_info_t ip;
+        esp_netif_get_ip_info(s_sta_netif, &ip);
+        char ipstr[16];
+        esp_ip4addr_ntoa(&ip.ip, ipstr, sizeof(ipstr));
+        snprintf(body, sizeof(body), "{\"ok\":true,\"ip\":\"%s\"}", ipstr);
+    } else {
+        snprintf(body, sizeof(body), "{\"ok\":false,\"message\":\"%s\"}",
+                 err == ESP_ERR_TIMEOUT ? "连接超时,请检查密码" : "连接失败");
+    }
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+}
+
+static esp_err_t start_httpd(void)
+{
+    httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
+    cfg.max_uri_handlers = 8;
+    cfg.lru_purge_enable = true;
+    if (httpd_start(&s_server, &cfg) != ESP_OK) return ESP_FAIL;
+
+    httpd_uri_t u;
+    memset(&u, 0, sizeof(u));
+    u.uri = "/"; u.method = HTTP_GET; u.handler = http_get_index;
+    httpd_register_uri_handler(s_server, &u);
+    u.uri = "/scan"; u.handler = http_get_scan;
+    httpd_register_uri_handler(s_server, &u);
+    u.uri = "/status"; u.handler = http_get_status;
+    httpd_register_uri_handler(s_server, &u);
+    u.uri = "/save"; u.method = HTTP_POST; u.handler = http_post_save;
+    httpd_register_uri_handler(s_server, &u);
+    return ESP_OK;
+}
+
+// ---------------------------------------------------------------- 公共接口
+esp_err_t provisioning_init(void)
+{
+    derive_ap_credentials();
+    esp_err_t err = nvs_flash_init();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "NVS 擦除后重试");
+        err = nvs_flash_erase();
+        if (err == ESP_OK) err = nvs_flash_init();
+    }
+    if (err != ESP_OK) return err;
+    nvs_read_str(NVS_KEY_SSID, s_ssid, sizeof(s_ssid));
+    nvs_read_str(NVS_KEY_PASS, s_pass, sizeof(s_pass));
+    nvs_read_str(NVS_KEY_NAME, s_nameplate, sizeof(s_nameplate));
+    return ESP_OK;
+}
+
+bool provisioning_configured(void)
+{
+    return s_ssid[0] != '\0';
+}
+
+esp_err_t provisioning_start(void)
+{
+    if (s_ap_up) return ESP_OK;
+    if (!s_netif_ready) {
+        esp_err_t err = esp_netif_init();
+        if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) return err;  // 已初始化算成功
+        s_netif_ready = true;
+    }
+    if (!s_event_ready) {
+        esp_err_t err = esp_event_loop_create_default();
+        if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) return err;
+        s_event_ready = true;
+    }
+    if (!s_wifi_init) {
+        wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+        if (esp_wifi_init(&cfg) != ESP_OK) return ESP_FAIL;
+        s_wifi_init = true;
+    }
+    esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
+                                        wifi_event_handler, NULL, &s_wifi_evt);
+    esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
+                                        ip_event_handler, NULL, &s_ip_evt);
+
+    s_ap_netif = esp_netif_create_default_wifi_ap();
+    s_sta_netif = esp_netif_create_default_wifi_sta();
+
+    wifi_config_t ap = { 0 };
+    strncpy((char *)ap.ap.ssid, s_ap_ssid, sizeof(ap.ap.ssid) - 1);
+    strncpy((char *)ap.ap.password, s_ap_pass, sizeof(ap.ap.password) - 1);
+    ap.ap.max_connection = 4;
+    ap.ap.authmode = WIFI_AUTH_WPA_WPA2_PSK;
+    ap.ap.channel = 1;
+
+    esp_wifi_set_mode(WIFI_MODE_APSTA);
+    esp_wifi_set_config(WIFI_IF_AP, &ap);
+
+    esp_netif_ip_info_t ip = { 0 };
+    ip.ip.addr = esp_ip4addr_aton(AP_IP);
+    ip.netmask.addr = esp_ip4addr_aton("255.255.255.0");
+    ip.gw.addr = esp_ip4addr_aton(AP_IP);
+    esp_netif_dhcps_stop(s_ap_netif);
+    esp_netif_set_ip_info(s_ap_netif, &ip);
+    esp_netif_dhcps_start(s_ap_netif);
+
+    if (esp_wifi_start() != ESP_OK) return ESP_FAIL;
+    s_ap_up = true;
+    s_state = PROV_AP_READY;
+    start_httpd();
+    ESP_LOGI(TAG, "热点 %s 就绪,密码 %s,地址 %s", s_ap_ssid, s_ap_pass, AP_IP);
+    return ESP_OK;
+}
+
+esp_err_t provisioning_stop(void)
+{
+    if (s_server) { httpd_stop(s_server); s_server = NULL; }
+    if (s_wifi_init) { esp_wifi_stop(); }
+    s_ap_up = false;
+    s_state = PROV_IDLE;
+    return ESP_OK;
+}
+
+provisioning_state_t provisioning_state(void) { return s_state; }
+const char *provisioning_ap_ssid(void) { return s_ap_ssid; }
+const char *provisioning_ap_password(void) { return s_ap_pass; }
+const char *provisioning_nameplate(void) { return s_nameplate; }
