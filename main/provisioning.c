@@ -16,6 +16,8 @@
 #include "nvs_flash.h"
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
+#include "cJSON.h"
 
 static const char *TAG = "prov";
 
@@ -43,6 +45,22 @@ static char s_ap_pass[16];
 static char s_nameplate[64];
 static char s_ssid[33];
 static char s_pass[65];
+static int s_volume=65;
+static bool s_volume_dirty;
+
+int provisioning_volume(void) { return s_volume; }
+void provisioning_set_volume(int value) {
+    if(value<0) value=0;
+    if(value>100) value=100;
+    if(value!=s_volume) {s_volume=value;s_volume_dirty=true;}
+}
+void provisioning_persist_volume(void) {
+    if(!s_volume_dirty) return;
+    nvs_handle_t h;
+    if(nvs_open(NVS_NS,NVS_READWRITE,&h)!=ESP_OK) return;
+    if(nvs_set_u8(h,"volume",(uint8_t)s_volume)==ESP_OK && nvs_commit(h)==ESP_OK) s_volume_dirty=false;
+    nvs_close(h);
+}
 
 // ---------------------------------------------------------------- NVS 存取
 static esp_err_t nvs_open_rw(nvs_handle_t *h)
@@ -126,10 +144,13 @@ static const char INDEX_PAGE[] =
 "<div class=row><input id=ssid placeholder='手动输入或扫描'><button id=scan type=button onclick='doScan()'>扫描</button></div>"
 "<label>密码</label><div class=row><input id=pass type=password placeholder='Wi-Fi 密码'><button type=button onclick='togglePw(this)'>显示</button></div>"
 "<label>Agent 铭牌</label><input id=nameplate placeholder='SMN-XXXX-XXXX'>"
+"<label>播放音量 <span id=volumeLabel>65</span>%</label><input id=volume type=range min=0 max=100 value=65 oninput='document.getElementById(\"volumeLabel\").textContent=this.value' onchange='setVolume(this.value)'>"
 "<button type=button onclick='doSave(this)' style='width:100%;margin-top:18px'>保存并连接</button>"
 "<div id=status></div></div>"
 "<script>"
 "function setStatus(t,ok){var s=document.getElementById('status');s.textContent=t;s.className=ok?'ok':'err'}\n"
+"function setVolume(v){fetch('/volume',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'value='+v}).then(function(r){if(!r.ok)throw Error();setStatus('音量已调整',true)}).catch(function(){setStatus('音量调整失败')})}\n"
+"fetch('/status').then(function(r){return r.json()}).then(function(j){document.getElementById('nameplate').value=j.nameplate;document.getElementById('volume').value=j.volume;document.getElementById('volumeLabel').textContent=j.volume}).catch(function(){setStatus('状态读取失败')});\n"
 "function togglePw(btn){var p=document.getElementById('pass');p.type=(p.type==='password')?'text':'password';btn.textContent=(p.type==='password')?'显示':'隐藏'}\n"
 "function doScan(){var b=document.getElementById('scan');b.disabled=true;setStatus('扫描中…');fetch('/scan').then(function(r){return r.json()}).then(function(a){if(!a.length){setStatus('未发现热点');return}var d=document.createElement('select');a.forEach(function(x){var o=document.createElement('option');o.textContent=x.ssid+' ('+x.rssi+'dBm)';o.value=x.ssid;d.appendChild(o)});var s=document.getElementById('ssid');s.parentNode.insertBefore(d,s.nextSibling);d.onchange=function(){s.value=this.value;this.remove()};setStatus('选一个热点')}).catch(function(){setStatus('扫描失败')}).finally(function(){b.disabled=false})}\n"
 "function doSave(btn){btn.disabled=true;setStatus('保存中…');var body=new URLSearchParams();body.set('ssid',document.getElementById('ssid').value);body.set('pass',document.getElementById('pass').value);body.set('nameplate',document.getElementById('nameplate').value);fetch('/save',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body}).then(function(r){return r.json()}).then(function(j){setStatus(j.ok?('已连接: '+j.ip):('失败: '+j.message),j.ok)}).catch(function(){setStatus('请求失败')}).finally(function(){btn.disabled=false})}\n"
@@ -166,14 +187,26 @@ static esp_err_t http_get_scan(httpd_req_t *req)
 
 static esp_err_t http_get_status(httpd_req_t *req)
 {
-    char body[320];
-    snprintf(body, sizeof(body),
-             "{\"configured\":%s,\"state\":\"%s\",\"ssid\":\"%s\",\"nameplate\":\"%s\"}",
-             provisioning_configured() ? "true" : "false",
-             s_state == PROV_CONNECTED ? "connected" : "provisioning",
-             s_ssid, s_nameplate);
+    cJSON *j=cJSON_CreateObject();
+    cJSON_AddBoolToObject(j,"configured",provisioning_configured());
+    cJSON_AddStringToObject(j,"state",s_state==PROV_CONNECTED ? "connected" : "provisioning");
+    cJSON_AddStringToObject(j,"ssid",s_ssid);cJSON_AddStringToObject(j,"nameplate",s_nameplate);
+    cJSON_AddNumberToObject(j,"volume",s_volume);
+    char *body=cJSON_PrintUnformatted(j);cJSON_Delete(j);
+    if(!body) return ESP_ERR_NO_MEM;
     httpd_resp_set_type(req, "application/json");
-    return httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);
+    esp_err_t err=httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);free(body);return err;
+}
+
+static esp_err_t http_post_volume(httpd_req_t *req) {
+    char body[20]={0};
+    if(req->content_len<7 || req->content_len>=sizeof(body)) return httpd_resp_send_err(req,HTTPD_400_BAD_REQUEST,"invalid volume");
+    int got=httpd_req_recv(req,body,req->content_len);
+    if(got!=req->content_len || strncmp(body,"value=",6)) return httpd_resp_send_err(req,HTTPD_400_BAD_REQUEST,"invalid volume");
+    char *end;long value=strtol(body+6,&end,10);
+    if(*end || value<0 || value>100) return httpd_resp_send_err(req,HTTPD_400_BAD_REQUEST,"invalid volume");
+    provisioning_set_volume((int)value);
+    httpd_resp_set_type(req,"application/json");return httpd_resp_send(req,"{\"ok\":true}",HTTPD_RESP_USE_STRLEN);
 }
 
 static esp_err_t connect_sta(const char *ssid, const char *pass)
@@ -319,6 +352,8 @@ static esp_err_t start_httpd(void)
     httpd_register_uri_handler(s_server, &u);
     u.uri = "/save"; u.method = HTTP_POST; u.handler = http_post_save;
     httpd_register_uri_handler(s_server, &u);
+    u.uri = "/volume"; u.handler = http_post_volume;
+    httpd_register_uri_handler(s_server, &u);
     return ESP_OK;
 }
 
@@ -336,6 +371,12 @@ esp_err_t provisioning_init(void)
     nvs_read_str(NVS_KEY_SSID, s_ssid, sizeof(s_ssid));
     nvs_read_str(NVS_KEY_PASS, s_pass, sizeof(s_pass));
     nvs_read_str(NVS_KEY_NAME, s_nameplate, sizeof(s_nameplate));
+    nvs_handle_t h;
+    if(nvs_open(NVS_NS,NVS_READONLY,&h)==ESP_OK) {
+        uint8_t volume;
+        if(nvs_get_u8(h,"volume",&volume)==ESP_OK && volume<=100) s_volume=volume;
+        nvs_close(h);
+    }
     return ESP_OK;
 }
 

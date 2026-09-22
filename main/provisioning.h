@@ -38,3 +38,6 @@ const char *provisioning_ap_password(void);
 
 // 已保存的铭牌(可能为空)。
 const char *provisioning_nameplate(void);
+int provisioning_volume(void);
+void provisioning_set_volume(int value);
+void provisioning_persist_volume(void);
