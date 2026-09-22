@@ -32,22 +32,22 @@ int main(void) {
         test_read_fail_at = fail_at;
         record_and_play();
         assert(test_read_calls == fail_at && test_write_calls == 0);
-        assert(strcmp(test_status, "recording failed") == 0);
+        assert(strcmp(test_status, "录音失败") == 0);
     }
     test_read_calls = test_write_calls = 0;
     test_read_fail_at = 0;
     test_write_fail_at = 1;
     record_and_play();
-    assert(strcmp(test_status, "playback failed") == 0);
+    assert(strcmp(test_status, "播放失败") == 0);
     test_read_calls = test_write_calls = test_write_fail_at = 0;
     record_and_play();
-    assert(strncmp(test_status, "done.", 5) == 0);
+    assert(strncmp(test_status, "完成", sizeof("完成") - 1) == 0);
     assert(test_read_calls == 94 && test_write_calls == 94);
     test_read_calls = test_write_calls = 0;
     test_read_hook = cancel_recording;
     record_and_play();
     assert(test_read_calls == 1 && test_write_calls == 0);
-    assert(strncmp(test_status, "done.", 5) != 0);
+    assert(strncmp(test_status, "完成", sizeof("完成") - 1) != 0);
     puts("audio worker lifecycle and recording fault tests: PASS");
     return 0;
 }
