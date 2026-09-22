@@ -33,6 +33,7 @@ static bool s_netif_ready;
 static bool s_event_ready;
 static bool s_wifi_init;
 static bool s_ap_up;
+static bool s_handlers_ready;
 static httpd_handle_t s_server;
 static esp_netif_t *s_ap_netif;
 static esp_netif_t *s_sta_netif;
@@ -170,19 +171,18 @@ static esp_err_t http_get_scan(httpd_req_t *req)
     esp_err_t err = esp_wifi_scan_start(NULL, true);
     if (err == ESP_OK) err = esp_wifi_scan_get_ap_records(&count, aps);
 
-    char body[2048] = "[";
-    size_t used = 1;
+    cJSON *list=cJSON_CreateArray();
+    if(err!=ESP_OK) count=0;
     for (uint16_t i = 0; i < count; i++) {
         char ssid[34] = { 0 };
         memcpy(ssid, aps[i].ssid, sizeof(aps[i].ssid) < 33 ? sizeof(aps[i].ssid) : 32);
-        int w = snprintf(body + used, sizeof(body) - used, "%s{\"ssid\":\"%s\",\"rssi\":%d}",
-                         used > 1 ? "," : "", ssid, aps[i].rssi);
-        if (w < 0 || (size_t)w >= sizeof(body) - used) break;
-        used += (size_t)w;
+        cJSON *item=cJSON_CreateObject();cJSON_AddStringToObject(item,"ssid",ssid);
+        cJSON_AddNumberToObject(item,"rssi",aps[i].rssi);cJSON_AddItemToArray(list,item);
     }
-    snprintf(body + used, sizeof(body) - used, "]");
+    char *body=cJSON_PrintUnformatted(list);cJSON_Delete(list);
+    if(!body) return ESP_ERR_NO_MEM;
     httpd_resp_set_type(req, "application/json");
-    return httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);
+    err=httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);free(body);return err;
 }
 
 static esp_err_t http_get_status(httpd_req_t *req)
@@ -265,14 +265,16 @@ static void url_decode(const char *src, char *dst, size_t dst_size)
 static esp_err_t http_post_save(httpd_req_t *req)
 {
     char buf[400] = { 0 };
-    int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
-    if (len <= 0) {
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "empty body");
-        return ESP_OK;
+    if(req->content_len<=0 || req->content_len>=sizeof(buf)) return httpd_resp_send_err(req,HTTPD_400_BAD_REQUEST,"invalid body length");
+    int len=0;
+    while(len<req->content_len) {
+        int n=httpd_req_recv(req,buf+len,req->content_len-len);
+        if(n<=0) return httpd_resp_send_err(req,HTTPD_400_BAD_REQUEST,"incomplete body");
+        len+=n;
     }
     buf[len] = '\0';
 
-    char raw_ssid[128] = { 0 }, raw_pass[128] = { 0 }, raw_name[128] = { 0 };
+    char raw_ssid[128] = { 0 }, raw_pass[196] = { 0 }, raw_name[128] = { 0 };
     char ssid[33] = { 0 }, pass[65] = { 0 }, nameplate[64] = { 0 };
     char *save = NULL;
     for (char *tok = strtok_r(buf, "&", &save); tok; tok = strtok_r(NULL, "&", &save)) {
@@ -403,13 +405,16 @@ esp_err_t provisioning_start(void)
         if (esp_wifi_init(&cfg) != ESP_OK) return ESP_FAIL;
         s_wifi_init = true;
     }
+    if(!s_handlers_ready) {
     esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
                                         wifi_event_handler, NULL, &s_wifi_evt);
     esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
                                         ip_event_handler, NULL, &s_ip_evt);
+    s_handlers_ready=true;
+    }
 
-    s_ap_netif = esp_netif_create_default_wifi_ap();
-    s_sta_netif = esp_netif_create_default_wifi_sta();
+    if(!s_ap_netif) s_ap_netif = esp_netif_create_default_wifi_ap();
+    if(!s_sta_netif) s_sta_netif = esp_netif_create_default_wifi_sta();
 
     wifi_config_t ap = { 0 };
     strncpy((char *)ap.ap.ssid, s_ap_ssid, sizeof(ap.ap.ssid) - 1);
