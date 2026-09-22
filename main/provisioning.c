@@ -12,6 +12,7 @@
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 #include <stdio.h>
@@ -48,6 +49,11 @@ static char s_ssid[33];
 static char s_pass[65];
 static int s_volume=65;
 static bool s_volume_dirty;
+static SemaphoreHandle_t s_job_lock;
+static volatile int s_scan_state, s_save_state; /* 0 idle, 1 running, 2 done, 3 error */
+static char *s_scan_results;
+static char s_save_message[128];
+static unsigned s_prov_epoch;
 
 int provisioning_volume(void) { return s_volume; }
 void provisioning_set_volume(int value) {
@@ -149,12 +155,15 @@ static const char INDEX_PAGE[] =
 "<button type=button onclick='doSave(this)' style='width:100%;margin-top:18px'>保存并连接</button>"
 "<div id=status></div></div>"
 "<script>"
-"function setStatus(t,ok){var s=document.getElementById('status');s.textContent=t;s.className=ok?'ok':'err'}\n"
-"function setVolume(v){fetch('/volume',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'value='+v}).then(function(r){if(!r.ok)throw Error();setStatus('音量已调整',true)}).catch(function(){setStatus('音量调整失败')})}\n"
-"fetch('/status').then(function(r){return r.json()}).then(function(j){document.getElementById('nameplate').value=j.nameplate;document.getElementById('volume').value=j.volume;document.getElementById('volumeLabel').textContent=j.volume}).catch(function(){setStatus('状态读取失败')});\n"
-"function togglePw(btn){var p=document.getElementById('pass');p.type=(p.type==='password')?'text':'password';btn.textContent=(p.type==='password')?'显示':'隐藏'}\n"
-"function doScan(){var b=document.getElementById('scan');b.disabled=true;setStatus('扫描中…');fetch('/scan').then(function(r){return r.json()}).then(function(a){if(!a.length){setStatus('未发现热点');return}var d=document.createElement('select');a.forEach(function(x){var o=document.createElement('option');o.textContent=x.ssid+' ('+x.rssi+'dBm)';o.value=x.ssid;d.appendChild(o)});var s=document.getElementById('ssid');s.parentNode.insertBefore(d,s.nextSibling);d.onchange=function(){s.value=this.value;this.remove()};setStatus('选一个热点')}).catch(function(){setStatus('扫描失败')}).finally(function(){b.disabled=false})}\n"
-"function doSave(btn){btn.disabled=true;setStatus('保存中…');var body=new URLSearchParams();body.set('ssid',document.getElementById('ssid').value);body.set('pass',document.getElementById('pass').value);body.set('nameplate',document.getElementById('nameplate').value);fetch('/save',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body}).then(function(r){return r.json()}).then(function(j){setStatus(j.ok?('已连接: '+j.ip):('失败: '+j.message),j.ok)}).catch(function(){setStatus('请求失败')}).finally(function(){btn.disabled=false})}\n"
+"const byId=id=>document.getElementById(id);\n"
+"function setStatus(text,ok){const el=byId('status');el.textContent=text;el.className=ok?'ok':'err';}\n"
+"async function request(path,options={}){const ctl=new AbortController();const timer=setTimeout(()=>ctl.abort(),5000);try{const r=await fetch(path,{...options,signal:ctl.signal,cache:'no-store'});if(!r.ok)throw Error('设备请求失败 '+r.status);return await r.json();}catch(e){if(e.name==='AbortError')throw Error('请求超时，请确认手机仍连接设备热点，再重试');throw e;}finally{clearTimeout(timer);}}\n"
+"const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));\n"
+"async function setVolume(v){try{const j=await request('/volume',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'value='+v});if(!j.ok)throw Error('音量调整失败');setStatus('音量已调整',true);}catch(e){setStatus(e.message);}}\n"
+"request('/status').then(j=>{byId('nameplate').value=j.nameplate;byId('volume').value=j.volume;byId('volumeLabel').textContent=j.volume;}).catch(e=>setStatus(e.message));\n"
+"function togglePw(btn){const p=byId('pass');p.type=p.type==='password'?'text':'password';btn.textContent=p.type==='password'?'显示':'隐藏';}\n"
+"async function doScan(){const btn=byId('scan');btn.disabled=true;setStatus('扫描中，通常需要 2～5 秒…');try{const started=await request('/scan/start',{method:'POST'});if(!started.ok)throw Error(started.message);const deadline=Date.now()+15000;let data;while(Date.now()<deadline){await sleep(600);data=await request('/scan');if(data.state==='done')break;if(data.state==='error')throw Error('扫描失败，可以手动填写 Wi-Fi 名称');}if(!data||data.state!=='done')throw Error('扫描超时，请重试或手动填写 Wi-Fi 名称');const old=byId('networkList');if(old)old.remove();if(!data.items.length){setStatus('未发现 2.4GHz Wi-Fi，可以手动填写');return;}const list=document.createElement('select');list.id='networkList';const placeholder=document.createElement('option');placeholder.textContent='请选择 Wi-Fi';placeholder.value='';list.appendChild(placeholder);data.items.forEach(item=>{const option=document.createElement('option');option.textContent=item.ssid+' ('+item.rssi+'dBm)';option.value=item.ssid;list.appendChild(option);});const input=byId('ssid');input.parentNode.insertBefore(list,input.nextSibling);list.onchange=()=>{input.value=list.value;};setStatus('扫描完成，请选择 Wi-Fi',true);}catch(e){setStatus(e.message);}finally{btn.disabled=false;}}\n"
+"async function doSave(btn){btn.disabled=true;setStatus('正在提交配置…');try{const body=new URLSearchParams({ssid:byId('ssid').value,pass:byId('pass').value,nameplate:byId('nameplate').value.trim().toUpperCase()});const j=await request('/save',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body});if(!j.ok)throw Error(j.message||'保存失败');if(!j.pending){setStatus(j.ip||'铭牌已保存，双击设备确定键返回',true);return;}setStatus('正在连接 Wi-Fi，最多等待 20 秒，请保持手机连接设备热点…');const deadline=Date.now()+30000;while(Date.now()<deadline){await sleep(800);const state=await request('/status');if(state.save_state==='done'){setStatus(state.message,true);return;}if(state.save_state==='error')throw Error(state.message);}throw Error('连接超时。若手机已断开设备热点，请重新连接并刷新查看结果');}catch(e){setStatus(e.message);}finally{btn.disabled=false;}}\n"
 "</script>";
 
 static esp_err_t http_get_index(httpd_req_t *req)
@@ -164,11 +173,13 @@ static esp_err_t http_get_index(httpd_req_t *req)
     return httpd_resp_send(req, INDEX_PAGE, HTTPD_RESP_USE_STRLEN);
 }
 
-static esp_err_t http_get_scan(httpd_req_t *req)
+static void scan_worker(void *arg)
 {
-    wifi_ap_record_t aps[16];
+    unsigned epoch=(unsigned)(uintptr_t)arg;
+    wifi_ap_record_t *aps=calloc(16,sizeof(wifi_ap_record_t));
     uint16_t count = 16;
-    esp_err_t err = esp_wifi_scan_start(NULL, true);
+    wifi_scan_config_t config={0};config.scan_time.active.min=40;config.scan_time.active.max=120;
+    esp_err_t err = aps ? esp_wifi_scan_start(&config, true) : ESP_ERR_NO_MEM;
     if (err == ESP_OK) err = esp_wifi_scan_get_ap_records(&count, aps);
 
     cJSON *list=cJSON_CreateArray();
@@ -180,9 +191,36 @@ static esp_err_t http_get_scan(httpd_req_t *req)
         cJSON_AddNumberToObject(item,"rssi",aps[i].rssi);cJSON_AddItemToArray(list,item);
     }
     char *body=cJSON_PrintUnformatted(list);cJSON_Delete(list);
+    free(aps);
+    xSemaphoreTake(s_job_lock,portMAX_DELAY);
+    free(s_scan_results);s_scan_results=body;
+    s_scan_state=err==ESP_OK && body && epoch==s_prov_epoch ? 2 : 3;
+    xSemaphoreGive(s_job_lock);
+    ESP_LOGI(TAG,"scan finished: %s, count=%u",esp_err_to_name(err),count);
+    vTaskDelete(NULL);
+}
+
+static esp_err_t http_start_scan(httpd_req_t *req) {
+    httpd_resp_set_type(req,"application/json");
+    if(s_save_state==1 || s_scan_state==1) return httpd_resp_send(req,"{\"ok\":false,\"message\":\"已有扫描或连接任务，请稍候\"}",HTTPD_RESP_USE_STRLEN);
+    s_scan_state=1;
+    if(xTaskCreate(scan_worker,"prov_scan",6144,(void*)(uintptr_t)s_prov_epoch,3,NULL)!=pdPASS) {
+        s_scan_state=3;return httpd_resp_send(req,"{\"ok\":false,\"message\":\"内存不足，无法扫描\"}",HTTPD_RESP_USE_STRLEN);
+    }
+    return httpd_resp_send(req,"{\"ok\":true}",HTTPD_RESP_USE_STRLEN);
+}
+
+static esp_err_t http_get_scan(httpd_req_t *req) {
+    cJSON *j=cJSON_CreateObject();
+    xSemaphoreTake(s_job_lock,portMAX_DELAY);
+    cJSON_AddStringToObject(j,"state",s_scan_state==1 ? "running" : s_scan_state==2 ? "done" : "error");
+    cJSON *items=s_scan_state==2 && s_scan_results ? cJSON_Parse(s_scan_results) : cJSON_CreateArray();
+    cJSON_AddItemToObject(j,"items",items);
+    xSemaphoreGive(s_job_lock);
+    char *body=cJSON_PrintUnformatted(j);cJSON_Delete(j);
     if(!body) return ESP_ERR_NO_MEM;
     httpd_resp_set_type(req, "application/json");
-    err=httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);free(body);return err;
+    esp_err_t err=httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);free(body);return err;
 }
 
 static esp_err_t http_get_status(httpd_req_t *req)
@@ -192,6 +230,10 @@ static esp_err_t http_get_status(httpd_req_t *req)
     cJSON_AddStringToObject(j,"state",s_state==PROV_CONNECTED ? "connected" : "provisioning");
     cJSON_AddStringToObject(j,"ssid",s_ssid);cJSON_AddStringToObject(j,"nameplate",s_nameplate);
     cJSON_AddNumberToObject(j,"volume",s_volume);
+    xSemaphoreTake(s_job_lock,portMAX_DELAY);
+    cJSON_AddStringToObject(j,"save_state",s_save_state==1 ? "running" : s_save_state==2 ? "done" : s_save_state==3 ? "error" : "idle");
+    cJSON_AddStringToObject(j,"message",s_save_message);
+    xSemaphoreGive(s_job_lock);
     char *body=cJSON_PrintUnformatted(j);cJSON_Delete(j);
     if(!body) return ESP_ERR_NO_MEM;
     httpd_resp_set_type(req, "application/json");
@@ -209,16 +251,17 @@ static esp_err_t http_post_volume(httpd_req_t *req) {
     httpd_resp_set_type(req,"application/json");return httpd_resp_send(req,"{\"ok\":true}",HTTPD_RESP_USE_STRLEN);
 }
 
-static esp_err_t connect_sta(const char *ssid, const char *pass)
+static esp_err_t connect_sta(const char *ssid, const char *pass, unsigned epoch)
 {
     wifi_config_t cfg = { 0 };
     strncpy((char *)cfg.sta.ssid, ssid, sizeof(cfg.sta.ssid) - 1);
     strncpy((char *)cfg.sta.password, pass, sizeof(cfg.sta.password) - 1);
     cfg.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
-    cfg.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+    cfg.sta.threshold.authmode = pass[0] ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN;
 
     esp_err_t err = esp_wifi_set_mode(WIFI_MODE_APSTA);
     if (err != ESP_OK) return err;
+    s_state=PROV_AP_READY;esp_wifi_disconnect();vTaskDelay(pdMS_TO_TICKS(100));
     err = esp_wifi_set_config(WIFI_IF_STA, &cfg);
     if (err != ESP_OK) return err;
 
@@ -226,14 +269,34 @@ static esp_err_t connect_sta(const char *ssid, const char *pass)
     err = esp_wifi_connect();
     if (err != ESP_OK) return err;
 
-    // 轮询等待结果(配网页是短生命周期操作,阻塞可接受)。
+    // Background worker only; HTTP requests remain responsive.
     for (int i = 0; i < CONNECT_TIMEOUT_MS / 100; i++) {
+        if(epoch!=s_prov_epoch) return ESP_ERR_INVALID_STATE;
         if (s_state == PROV_CONNECTED) return ESP_OK;
         if (s_state == PROV_WIFI_FAILED) return ESP_FAIL;
         vTaskDelay(pdMS_TO_TICKS(100));
     }
     esp_wifi_disconnect();
     return ESP_ERR_TIMEOUT;
+}
+
+typedef struct { char ssid[33], pass[65], nameplate[64]; unsigned epoch; } save_job;
+static void save_worker(void *arg) {
+    save_job *job=arg;
+    esp_err_t err=connect_sta(job->ssid,job->pass,job->epoch);
+    if(err==ESP_OK) err=nvs_write_str(NVS_KEY_SSID,job->ssid);
+    if(err==ESP_OK) err=nvs_write_str(NVS_KEY_PASS,job->pass);
+    if(err==ESP_OK && job->nameplate[0]) err=nvs_write_str(NVS_KEY_NAME,job->nameplate);
+    xSemaphoreTake(s_job_lock,portMAX_DELAY);
+    if(err==ESP_OK) {
+        snprintf(s_ssid,sizeof(s_ssid),"%s",job->ssid);snprintf(s_pass,sizeof(s_pass),"%s",job->pass);
+        if(job->nameplate[0]) snprintf(s_nameplate,sizeof(s_nameplate),"%s",job->nameplate);
+        snprintf(s_save_message,sizeof(s_save_message),"配置已保存，Wi-Fi 已连接；双击设备确定键返回");
+    } else snprintf(s_save_message,sizeof(s_save_message),"连接失败或超时，请检查 2.4GHz Wi-Fi 名称和密码");
+    s_save_state=err==ESP_OK ? 2 : 3;
+    xSemaphoreGive(s_job_lock);
+    memset(job,0,sizeof(*job));free(job);
+    ESP_LOGI(TAG,"save finished: %s",esp_err_to_name(err));vTaskDelete(NULL);
 }
 
 // 把 URL 编码表单值解码进 dst(+ -> 空格,%XX -> 字节)。
@@ -264,6 +327,8 @@ static void url_decode(const char *src, char *dst, size_t dst_size)
 
 static esp_err_t http_post_save(httpd_req_t *req)
 {
+    httpd_resp_set_type(req,"application/json");
+    if(s_save_state==1 || s_scan_state==1) return httpd_resp_send(req,"{\"ok\":false,\"message\":\"已有扫描或连接任务，请稍候\"}",HTTPD_RESP_USE_STRLEN);
     char buf[400] = { 0 };
     if(req->content_len<=0 || req->content_len>=sizeof(buf)) return httpd_resp_send_err(req,HTTPD_400_BAD_REQUEST,"invalid body length");
     int len=0;
@@ -313,34 +378,25 @@ static esp_err_t http_post_save(httpd_req_t *req)
         return httpd_resp_send(req,saved==ESP_OK ? "{\"ok\":true,\"ip\":\"铭牌已保存，双击设备确定键返回\"}" : "{\"ok\":false,\"message\":\"保存失败\"}",HTTPD_RESP_USE_STRLEN);
     }
 
-    esp_err_t err = connect_sta(ssid, pass);
-    char body[320];
-    if (err == ESP_OK) {
-        // 验证成功才原子提交,坏配置不覆盖旧值。
-        nvs_write_str(NVS_KEY_SSID, ssid);
-        nvs_write_str(NVS_KEY_PASS, pass);
-        if (nameplate[0]) nvs_write_str(NVS_KEY_NAME, nameplate);
-        strncpy(s_ssid, ssid, sizeof(s_ssid) - 1);
-        strncpy(s_pass, pass, sizeof(s_pass) - 1);
-        strncpy(s_nameplate, nameplate, sizeof(s_nameplate) - 1);
-        esp_netif_ip_info_t ip;
-        esp_netif_get_ip_info(s_sta_netif, &ip);
-        char ipstr[16];
-        esp_ip4addr_ntoa(&ip.ip, ipstr, sizeof(ipstr));
-        snprintf(body, sizeof(body), "{\"ok\":true,\"ip\":\"%s\"}", ipstr);
-    } else {
-        snprintf(body, sizeof(body), "{\"ok\":false,\"message\":\"%s\"}",
-                 err == ESP_ERR_TIMEOUT ? "连接超时,请检查密码" : "连接失败");
+    save_job *job=calloc(1,sizeof(*job));
+    if(!job) return httpd_resp_send(req,"{\"ok\":false,\"message\":\"内存不足\"}",HTTPD_RESP_USE_STRLEN);
+    snprintf(job->ssid,sizeof(job->ssid),"%s",ssid);snprintf(job->pass,sizeof(job->pass),"%s",pass);
+    snprintf(job->nameplate,sizeof(job->nameplate),"%s",nameplate);job->epoch=s_prov_epoch;
+    s_save_state=1;
+    if(xTaskCreate(save_worker,"prov_connect",6144,job,3,NULL)!=pdPASS) {
+        memset(job,0,sizeof(*job));free(job);s_save_state=3;
+        return httpd_resp_send(req,"{\"ok\":false,\"message\":\"无法启动连接任务\"}",HTTPD_RESP_USE_STRLEN);
     }
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);
-    return ESP_OK;
+    return httpd_resp_send(req,"{\"ok\":true,\"pending\":true}",HTTPD_RESP_USE_STRLEN);
 }
 
 static esp_err_t start_httpd(void)
 {
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.max_uri_handlers = 8;
+    cfg.stack_size = 8192;
+    cfg.recv_wait_timeout = 3;
+    cfg.send_wait_timeout = 3;
     cfg.lru_purge_enable = true;
     if (httpd_start(&s_server, &cfg) != ESP_OK) return ESP_FAIL;
 
@@ -356,12 +412,16 @@ static esp_err_t start_httpd(void)
     httpd_register_uri_handler(s_server, &u);
     u.uri = "/volume"; u.handler = http_post_volume;
     httpd_register_uri_handler(s_server, &u);
+    u.uri = "/scan/start"; u.handler = http_start_scan;
+    httpd_register_uri_handler(s_server, &u);
     return ESP_OK;
 }
 
 // ---------------------------------------------------------------- 公共接口
 esp_err_t provisioning_init(void)
 {
+    if(!s_job_lock) s_job_lock=xSemaphoreCreateMutex();
+    if(!s_job_lock) return ESP_ERR_NO_MEM;
     derive_ap_credentials();
     esp_err_t err = nvs_flash_init();
     if (err != ESP_OK) {
@@ -444,6 +504,7 @@ esp_err_t provisioning_start(void)
 
 esp_err_t provisioning_stop(void)
 {
+    s_prov_epoch++;
     if (s_server) { httpd_stop(s_server); s_server = NULL; }
     if (s_wifi_init) { esp_wifi_stop(); }
     s_ap_up = false;
