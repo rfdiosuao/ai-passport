@@ -49,7 +49,8 @@ provisioning_state_t provisioning_state(void) {return s_state;}
 const char *provisioning_nameplate(void) {return s_nameplate;}
 int provisioning_volume(void) {return s_volume;}
 void provisioning_set_volume(int v) {
-    if(v<0)v=0;if(v>100)v=100;
+    if(v<0)v=0;
+    if(v>100)v=100;
     if(v!=s_volume){s_volume=v;s_volume_dirty=true;}
 }
 void provisioning_persist_volume(void) {
