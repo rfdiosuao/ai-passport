@@ -107,7 +107,12 @@ static void tx_task(void *arg) {
     (void)arg;queued_frame frame;
     for(;;) if(xQueueReceive(outgoing,&frame,portMAX_DELAY)==pdTRUE) {
         xSemaphoreTake(client_lock,portMAX_DELAY);
-        if(client && connected && frame.generation==generation) esp_websocket_client_send_text(client,frame.text,strlen(frame.text),pdMS_TO_TICKS(2000));
+        if(client && connected && frame.generation==generation) {
+            int sent=esp_websocket_client_send_text(client,frame.text,strlen(frame.text),pdMS_TO_TICKS(5000));
+            if(sent<0) ESP_LOGE(TAG,"outbound websocket write failed");
+            else if(strstr(frame.text,"remote.ready") || strstr(frame.text,"play.done"))
+                ESP_LOGI(TAG,"control reply sent (%d bytes)",sent);
+        }
         xSemaphoreGive(client_lock);
         free(frame.text);
     }

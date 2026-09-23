@@ -57,3 +57,8 @@ CONFIG_ESP_WIFI_RX_BA_WIN=2
 CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
 CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=4096
 CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=2048
+# The cloud streams downlink audio while the device returns small control
+# receipts. Separate RX/TX locks prevent the WebSocket receive loop from
+# starving those receipts on a slow TLS connection.
+CONFIG_ESP_WS_CLIENT_SEPARATE_TX_LOCK=y
+CONFIG_ESP_WS_CLIENT_TX_LOCK_TIMEOUT_MS=5000
