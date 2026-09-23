@@ -1,13 +1,9 @@
 /* SUMMON Passport: Wi-Fi audio to cloud; USB is maintenance configuration only. */
 #include "bsp_i2c.h"
-#include "bsp_display.h"
 #include "bsp_button.h"
 #include "bsp_audio.h"
-#include "bsp_battery.h"
 #include "provisioning.h"
 #include "summon_network.h"
-#include "ui_font.h"
-#include "lvgl.h"
 #include "cJSON.h"
 #include "mbedtls/base64.h"
 #include "esp_log.h"
@@ -29,7 +25,6 @@ static QueueHandle_t playback;
 static volatile bool play_ended;
 static unsigned play_sequence;
 static SemaphoreHandle_t tx_lock;
-static lv_obj_t *status_label, *plate_label, *battery_label, *volume_label, *network_label;
 static volatile bool recording, cancelled, playing, finish_recording;
 static volatile unsigned turn;
 static bool audio_ready;
@@ -55,14 +50,7 @@ static cJSON *message(const char *type, unsigned id) {
     return j;
 }
 static void status(const char *s) {
-    if (bsp_lvgl_lock(500)) {
-        lv_label_set_text(status_label,s);
-        lv_label_set_text_fmt(plate_label,"%s",provisioning_nameplate()[0] ? provisioning_nameplate() : "未配置铭牌");
-        int soc=bsp_battery_soc();
-        if(soc >= 0) lv_label_set_text_fmt(battery_label,"%d%%",soc);
-        else lv_label_set_text(battery_label,"--");
-        bsp_lvgl_unlock();
-    }
+    (void)s; // The voice-only MVP has no screen; never block audio on LVGL.
 }
 static void hello(void) {
     cJSON *j=message("hello",turn);
@@ -111,8 +99,8 @@ static void playback_task(void *unused) {
     for(;;) {
         while(!playing) vTaskDelay(pdMS_TO_TICKS(10));
         unsigned id=turn,underruns=0,bytes=0;
-        // Prebuffer 384 ms; USB ACK means queued, not yet played.
-        while(playing && !cancelled && !play_ended && uxQueueMessagesWaiting(playback)<12) vTaskDelay(pdMS_TO_TICKS(2));
+        // Four frames match the cloud's bounded send window (128 ms).
+        while(playing && !cancelled && !play_ended && uxQueueMessagesWaiting(playback)<4) vTaskDelay(pdMS_TO_TICKS(2));
         int64_t started=esp_timer_get_time();
         bool done=false;
         while(playing && !cancelled && id==turn) {
@@ -147,14 +135,9 @@ static void begin_record(void) {
 static void key_task(void *unused) {
     (void)unused; key_event e;int volume=-1;
     for (;;) {
-        if(bsp_lvgl_lock(50)) {
-            lv_label_set_text(network_label,summon_network_online() ? "云端在线" : "正在联网");
-            bsp_lvgl_unlock();
-        }
         int next=provisioning_volume();
         if(volume!=next) {
             volume=next;if(audio_ready) bsp_audio_set_volume((uint8_t)volume);
-            if(bsp_lvgl_lock(100)) {lv_label_set_text_fmt(volume_label,"音量 %d%%",volume);bsp_lvgl_unlock();}
         }
         if(!playing && !recording) provisioning_persist_volume();
         if(xQueueReceive(keys,&e,pdMS_TO_TICKS(100))!=pdTRUE) continue;
@@ -258,26 +241,9 @@ void app_main(void) {
     tx_lock=xSemaphoreCreateMutex(); keys=xQueueCreate(8,sizeof(key_event));playback=xQueueCreate(16,sizeof(playback_chunk));
     if(!tx_lock || !keys || !playback) return;
     ESP_ERROR_CHECK(bsp_i2c_init());
-    ESP_ERROR_CHECK(bsp_display_init()); if(!bsp_lvgl_init()) return;
-    ui_font_init();bsp_display_backlight(80);bsp_battery_init();
     ESP_ERROR_CHECK(provisioning_init());
     audio_ready=bsp_audio_init()==ESP_OK && bsp_audio_set_format(16000,16,1)==ESP_OK;
     if(audio_ready) bsp_audio_set_volume((uint8_t)provisioning_volume());
-    if(!bsp_lvgl_lock(1000)) return;
-    lv_obj_t *screen=lv_obj_create(NULL);
-    lv_obj_set_style_bg_color(screen,lv_color_hex(0x10182A),0);
-    lv_obj_set_style_text_color(screen,lv_color_hex(0xE2ECFF),0);
-    lv_obj_set_style_text_font(screen,ui_font_body(),0);
-    lv_obj_t *title=lv_label_create(screen);lv_label_set_text(title,"SUMMON / 唤名");lv_obj_align(title,LV_ALIGN_TOP_LEFT,14,18);
-    battery_label=lv_label_create(screen);lv_obj_align(battery_label,LV_ALIGN_TOP_RIGHT,-12,44);
-    volume_label=lv_label_create(screen);lv_obj_align(volume_label,LV_ALIGN_TOP_LEFT,12,44);
-    plate_label=lv_label_create(screen);lv_obj_set_width(plate_label,216);lv_obj_align(plate_label,LV_ALIGN_TOP_LEFT,12,75);
-    lv_obj_set_style_text_color(plate_label,lv_color_hex(0x6DE9D4),0);
-    status_label=lv_label_create(screen);lv_obj_set_width(status_label,212);lv_obj_align(status_label,LV_ALIGN_TOP_LEFT,14,119);
-    lv_label_set_long_mode(status_label,LV_LABEL_LONG_WRAP);
-    network_label=lv_label_create(screen);lv_obj_align(network_label,LV_ALIGN_TOP_LEFT,12,96);
-    lv_obj_t *footer=lv_label_create(screen);lv_label_set_text(footer,"上下音量 / 确定说话\n长按下键重连 / 双击确定取消");lv_obj_align(footer,LV_ALIGN_BOTTOM_LEFT,12,-8);
-    lv_screen_load(screen);bsp_lvgl_unlock();
     status(audio_ready ? (provisioning_configured() ? "正在连接 Wi-Fi 与云端…" : "未配置 Wi-Fi\n请通过 USB 维护口配置") : "音频初始化失败");
     if(xTaskCreate(record_task,"voice_record",6144,NULL,4,&recorder)!=pdPASS) return;
     if(xTaskCreate(playback_task,"voice_play",4096,NULL,5,NULL)!=pdPASS) return;
