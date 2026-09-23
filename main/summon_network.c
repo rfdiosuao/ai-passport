@@ -4,6 +4,7 @@
 #include "esp_websocket_client.h"
 #include "esp_crt_bundle.h"
 #include "esp_sntp.h"
+#include "esp_log.h"
 #include "nvs.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -23,6 +24,7 @@ static char token[96],headers[160];
 static char assembly[2048];
 static size_t assembled;
 static volatile unsigned generation;
+static const char *TAG="summon_net";
 typedef struct {char *text;unsigned generation;} queued_frame;
 
 bool summon_network_online(void) {return connected;}
@@ -58,6 +60,7 @@ static void event(void *arg,esp_event_base_t base,int32_t id,void *data) {
         if(e->payload_offset!=assembled || assembled+e->data_len>=sizeof(assembly)) {assembled=0;return;}
         memcpy(assembly+assembled,e->data_ptr,e->data_len);assembled+=e->data_len;
         if(assembled==e->payload_len) {
+            if(strstr(assembly,"remote.begin")) ESP_LOGI(TAG,"received remote.begin frame (%u bytes)",(unsigned)assembled);
             assembly[assembled]=0;queued_frame frame={.text=strdup(assembly),.generation=generation};
             if(frame.text && xQueueSend(incoming,&frame,0)!=pdTRUE) free(frame.text);
             assembled=0;

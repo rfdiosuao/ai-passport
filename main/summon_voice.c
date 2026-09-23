@@ -39,7 +39,9 @@ static void send_json(cJSON *j) {
     if (s) {
         xSemaphoreTake(tx_lock, portMAX_DELAY);
         if(summon_network_online()) {
-            if(!summon_network_send(s)) cancelled=true;
+            bool sent=summon_network_send(s);
+            if(!sent) {cancelled=true;if(strstr(s,"remote.ready")) ESP_LOGE("summon","remote.ready queue failed");}
+            else if(strstr(s,"remote.ready")) ESP_LOGI("summon","remote.ready queued for turn %u",turn);
         } else {printf("\nSUMMON1 %s\n", s); fflush(stdout);}
         xSemaphoreGive(tx_lock); free(s);
     }
@@ -182,7 +184,7 @@ static void receive(const char *line) {
         cancelled=true;playing=false;xQueueReset(playback);status("连接断开，正在重连\n未完成的指令不会重放");
     }
     else if(strcmp(op->valuestring,"remote.begin")==0 && cJSON_IsNumber(id) && !recording && !playing && !configuring) {
-        turn=(unsigned)id->valuedouble;cancelled=false;send_json(message("remote.ready",turn));
+        turn=(unsigned)id->valuedouble;cancelled=false;ESP_LOGI("summon","accepting remote.begin turn %u",turn);send_json(message("remote.ready",turn));
     }
     else if(strcmp(op->valuestring,"record")==0) begin_record();
     else if(cJSON_IsNumber(id) && (unsigned)id->valuedouble==turn && !cancelled) {
