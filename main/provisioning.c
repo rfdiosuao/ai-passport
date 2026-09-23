@@ -500,6 +500,14 @@ esp_err_t provisioning_start(void)
 
     if (!s_wifi_started && esp_wifi_start() != ESP_OK) return ESP_FAIL;
     s_wifi_started=true;
+    // Voice frames need steady bidirectional latency. ESP-IDF's default STA
+    // modem sleep can defer small WebSocket frames/ACKs for beacon intervals,
+    // exhausting the tiny playback prebuffer even with ample free heap.
+    esp_err_t ps_err=esp_wifi_set_ps(WIFI_PS_NONE);
+    if(ps_err!=ESP_OK) {
+        ESP_LOGE(TAG,"Wi-Fi voice power-save disable failed: %s",esp_err_to_name(ps_err));
+        return ps_err;
+    }
     s_ap_up = true;
     if(s_state!=PROV_CONNECTED) s_state = PROV_AP_READY;
     start_httpd();
