@@ -59,11 +59,15 @@ static void event(void *arg,esp_event_base_t base,int32_t id,void *data) {
     (void)arg;(void)base;
     if(id==WEBSOCKET_EVENT_CONNECTED) {connected=true;assembled=0;}
     else if(id==WEBSOCKET_EVENT_DISCONNECTED || id==WEBSOCKET_EVENT_ERROR) {
-        connected=false;assembled=0;generation++;
-        /* Order the loss notification before the next hello on the same RX
-         * queue. A delayed polling task must not cancel a restored session. */
-        queued_frame frame={.text=strdup("{\"type\":\"network.lost\"}"),.generation=generation};
-        if(frame.text && xQueueSend(incoming,&frame,0)!=pdTRUE) free(frame.text);
+        bool was_connected=connected;
+        connected=false;assembled=0;
+        if(was_connected) {
+            generation++;
+            /* Order the loss notification before the next hello on the same RX
+             * queue. A delayed polling task must not cancel a restored session. */
+            queued_frame frame={.text=strdup("{\"type\":\"network.lost\"}"),.generation=generation};
+            if(frame.text && xQueueSend(incoming,&frame,0)!=pdTRUE) free(frame.text);
+        }
         ESP_LOGW(TAG,"transport lost; free=%u largest=%u",
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
@@ -126,7 +130,9 @@ static void network_task(void *arg) {
                         .uri="wss://summon.entermodetwo.com/v1/passport/connect",
                         .headers=headers,.crt_bundle_attach=esp_crt_bundle_attach,
                         .enable_close_reconnect=true,
-                        .buffer_size=2048,.task_stack=6144,.reconnect_timeout_ms=5000,.network_timeout_ms=5000};
+                        .buffer_size=2048,.task_stack=6144,
+                        .reconnect_timeout_ms=3000,.network_timeout_ms=20000,
+                        .ping_interval_sec=20,.pingpong_timeout_sec=60};
                     client=esp_websocket_client_init(&cfg);
                     if(client) {esp_websocket_register_events(client,WEBSOCKET_EVENT_ANY,event,NULL);esp_websocket_client_start(client);}
                 }
@@ -139,9 +145,7 @@ void summon_network_init(summon_receive_fn receive) {
     receiver=receive;nvs_handle_t h;
     if(nvs_open("summon",NVS_READONLY,&h)==ESP_OK) {size_t n=sizeof(token);if(nvs_get_str(h,"device_token",token,&n)!=ESP_OK) token[0]=0;nvs_close(h);}
     enabled=provisioning_configured();
-    /* Playback ACKs are tiny, but they must not block the RX task while the
-     * ESP32 Wi-Fi/TLS client is flushing a previous frame. Keep the larger
-     * media queue bounded and reserve a deeper queue for ACK/status frames. */
+    /* Keep JSON media frames bounded so TLS always has a contiguous block. */
     incoming=xQueueCreate(12,sizeof(queued_frame));
     outgoing=xQueueCreate(8,sizeof(queued_frame));
     client_lock=xSemaphoreCreateMutex();
