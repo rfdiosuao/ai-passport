@@ -132,10 +132,10 @@ static void network_task(void *arg) {
                 if(time(NULL)>1700000000 && !client) {
                     snprintf(headers,sizeof(headers),"Authorization: Bearer %s\r\n",token);
                     esp_websocket_client_config_t cfg={
-                        /* The website remains behind the CDN. Passport uses a
-                         * dedicated origin TLS port because constrained mbedTLS
-                         * handshakes were repeatedly closed by the CDN edge. */
-                        .uri="wss://103.185.249.189:30067/v1/passport/connect",
+                        /* The website remains behind the CDN. Passport connects
+                         * to the origin IP on standard TLS because constrained
+                         * mbedTLS handshakes were repeatedly closed at the edge. */
+                        .uri="wss://103.185.249.189/v1/passport/connect",
                         .cert_common_name="summon.entermodetwo.com",
                         .headers=headers,.crt_bundle_attach=esp_crt_bundle_attach,
                         .enable_close_reconnect=true,
