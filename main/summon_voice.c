@@ -186,6 +186,15 @@ static void receive(const char *line) {
     else if(strcmp(op->valuestring,"remote.begin")==0 && cJSON_IsNumber(id) && !recording && !playing && !configuring) {
         turn=(unsigned)id->valuedouble;cancelled=false;ESP_LOGI("summon","accepting remote.begin turn %u",turn);send_json(message("remote.ready",turn));
     }
+    else if(strcmp(op->valuestring,"remote.begin")==0 && cJSON_IsNumber(id)) {
+        /* Never leave the cloud waiting for a ready ACK when the device is
+         * occupied. The request is rejected explicitly and can be retried. */
+        cJSON *reply=message("play.error",(unsigned)id->valuedouble);
+        cJSON_AddNumberToObject(reply,"seq",-1);
+        ESP_LOGW("summon","rejected remote.begin turn %u (recording=%d playing=%d configuring=%d)",
+                 (unsigned)id->valuedouble,recording,playing,configuring);
+        send_json(reply);
+    }
     else if(strcmp(op->valuestring,"record")==0) begin_record();
     else if(cJSON_IsNumber(id) && (unsigned)id->valuedouble==turn && !cancelled) {
         if(strcmp(op->valuestring,"status")==0) {

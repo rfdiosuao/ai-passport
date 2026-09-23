@@ -62,14 +62,26 @@ static void event(void *arg,esp_event_base_t base,int32_t id,void *data) {
         if(assembled==e->payload_len) {
             if(strstr(assembly,"remote.begin")) ESP_LOGI(TAG,"received remote.begin frame (%u bytes)",(unsigned)assembled);
             assembly[assembled]=0;queued_frame frame={.text=strdup(assembly),.generation=generation};
-            if(frame.text && xQueueSend(incoming,&frame,0)!=pdTRUE) free(frame.text);
+            if(!frame.text) ESP_LOGE(TAG,"inbound frame allocation failed");
+            else if(xQueueSend(incoming,&frame,0)!=pdTRUE) {
+                ESP_LOGE(TAG,"inbound frame queue full; dropping frame");free(frame.text);
+            }
             assembled=0;
         }
     }
 }
 static void rx_task(void *arg) {
     (void)arg;queued_frame frame;
-    for(;;) if(xQueueReceive(incoming,&frame,portMAX_DELAY)==pdTRUE) {if(connected && frame.generation==generation) receiver(frame.text);free(frame.text);}
+    for(;;) if(xQueueReceive(incoming,&frame,portMAX_DELAY)==pdTRUE) {
+        /* Once a complete websocket frame is queued, a momentary transport
+         * state transition must not discard it. The voice state machine owns
+         * deciding whether to accept/reject it; generation is used only to
+         * suppress frames from a connection that was already replaced. */
+        if(frame.generation==generation) receiver(frame.text);
+        else ESP_LOGW(TAG,"discarding stale inbound frame (queued generation %u, current %u)",
+                      frame.generation,generation);
+        free(frame.text);
+    }
 }
 static void tx_task(void *arg) {
     (void)arg;queued_frame frame;
