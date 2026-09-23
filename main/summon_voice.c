@@ -99,7 +99,8 @@ static void record_task(void *unused) {
         j=message(ok && !cancelled ? "record.end" : "record.cancel",id);
         cJSON_AddNumberToObject(j,"bytes",count); send_json(j);
         recording=false;
-        status(cancelled ? "已取消\n确定重新说话" : ok ? "正在识别与请求 Agent…" : "采音失败\n请重新连接设备");
+        status(cancelled ? (summon_network_online() ? "云端已连接\n确定重新说话" : "已取消\n确定重新说话")
+                         : ok ? "正在识别与请求 Agent…" : "采音失败\n请重新连接设备");
     }
 }
 static TaskHandle_t recorder;
@@ -179,9 +180,13 @@ static void receive(const char *line) {
     cJSON *j=cJSON_Parse(line); if(!j) return;
     cJSON *op=cJSON_GetObjectItem(j,"type"), *id=cJSON_GetObjectItem(j,"turn");
     if(!cJSON_IsString(op)) {cJSON_Delete(j);return;}
-    if(strcmp(op->valuestring,"hello")==0) hello();
+    if(strcmp(op->valuestring,"hello")==0) {
+        hello();
+        if(!configuring && !recording && !playing) status("云端已连接\n确定说话 · 长按上键配网");
+    }
     else if(strcmp(op->valuestring,"network.lost")==0) {
-        cancelled=true;playing=false;xQueueReset(playback);status("连接断开，正在重连\n未完成的指令不会重放");
+        cancelled=true;playing=false;xQueueReset(playback);
+        if(!configuring) status("连接断开，正在重连\n未完成的指令不会重放");
     }
     else if(strcmp(op->valuestring,"remote.begin")==0 && cJSON_IsNumber(id) && !recording && !playing && !configuring) {
         turn=(unsigned)id->valuedouble;cancelled=false;ESP_LOGI("summon","accepting remote.begin turn %u",turn);send_json(message("remote.ready",turn));

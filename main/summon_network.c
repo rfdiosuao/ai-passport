@@ -5,6 +5,7 @@
 #include "esp_crt_bundle.h"
 #include "esp_sntp.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "nvs.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -57,7 +58,16 @@ bool summon_network_send(const char *json) {
 static void event(void *arg,esp_event_base_t base,int32_t id,void *data) {
     (void)arg;(void)base;
     if(id==WEBSOCKET_EVENT_CONNECTED) {connected=true;assembled=0;}
-    else if(id==WEBSOCKET_EVENT_DISCONNECTED || id==WEBSOCKET_EVENT_ERROR) {connected=false;assembled=0;generation++;}
+    else if(id==WEBSOCKET_EVENT_DISCONNECTED || id==WEBSOCKET_EVENT_ERROR) {
+        connected=false;assembled=0;generation++;
+        /* Order the loss notification before the next hello on the same RX
+         * queue. A delayed polling task must not cancel a restored session. */
+        queued_frame frame={.text=strdup("{\"type\":\"network.lost\"}"),.generation=generation};
+        if(frame.text && xQueueSend(incoming,&frame,0)!=pdTRUE) free(frame.text);
+        ESP_LOGW(TAG,"transport lost; free=%u largest=%u",
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+    }
     else if(id==WEBSOCKET_EVENT_DATA) {
         esp_websocket_event_data_t *e=data;
         if(e->op_code!=1 || e->payload_len<=0 || e->payload_len>=sizeof(assembly)) return;
@@ -65,8 +75,9 @@ static void event(void *arg,esp_event_base_t base,int32_t id,void *data) {
         if(e->payload_offset!=assembled || assembled+e->data_len>=sizeof(assembly)) {assembled=0;return;}
         memcpy(assembly+assembled,e->data_ptr,e->data_len);assembled+=e->data_len;
         if(assembled==e->payload_len) {
+            assembly[assembled]=0;
             if(strstr(assembly,"remote.begin")) ESP_LOGI(TAG,"received remote.begin frame (%u bytes)",(unsigned)assembled);
-            assembly[assembled]=0;queued_frame frame={.text=strdup(assembly),.generation=generation};
+            queued_frame frame={.text=strdup(assembly),.generation=generation};
             if(!frame.text) ESP_LOGE(TAG,"inbound frame allocation failed");
             else if(xQueueSend(incoming,&frame,0)!=pdTRUE) {
                 ESP_LOGE(TAG,"inbound frame queue full; dropping frame");free(frame.text);
@@ -98,9 +109,8 @@ static void tx_task(void *arg) {
     }
 }
 static void network_task(void *arg) {
-    (void)arg;bool clock_started=false;unsigned retry=0,last_generation=0;
+    (void)arg;bool clock_started=false;unsigned retry=0;
     for(;;) {
-        if(last_generation!=generation) {last_generation=generation;receiver("{\"type\":\"network.lost\"}");}
         if(provisioning_active() && client) {
             xSemaphoreTake(client_lock,portMAX_DELAY);
             connected=false;generation++;
@@ -121,6 +131,7 @@ static void network_task(void *arg) {
                     esp_websocket_client_config_t cfg={
                         .uri="wss://summon.entermodetwo.com/v1/passport/connect",
                         .headers=headers,.crt_bundle_attach=esp_crt_bundle_attach,
+                        .enable_close_reconnect=true,
                         .buffer_size=2048,.task_stack=6144,.reconnect_timeout_ms=5000,.network_timeout_ms=5000};
                     client=esp_websocket_client_init(&cfg);
                     if(client) {esp_websocket_register_events(client,WEBSOCKET_EVENT_ANY,event,NULL);esp_websocket_client_start(client);}
