@@ -15,5 +15,5 @@ void ui_font_init(void);
 // 正文/中文标题字体。未初始化时退化为 Montserrat 14(会被日志提示)。
 const lv_font_t *ui_font_body(void);
 
-// 标题字体:Montserrat 20,与 baseline 行为一致,适合拉丁文与品牌名。
+// 标题字体:语音应用使用同一套正文汉字字体，避免额外加载标题字库。
 const lv_font_t *ui_font_title(void);

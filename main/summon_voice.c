@@ -13,6 +13,7 @@
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -71,6 +72,7 @@ static void hello(void) {
     cJSON_AddBoolToObject(j,"audio_ready",audio_ready);
     cJSON_AddNumberToObject(j,"volume",provisioning_volume());
     cJSON_AddNumberToObject(j,"free_heap",esp_get_free_heap_size());
+    cJSON_AddNumberToObject(j,"largest_block",heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
     send_json(j);
 }
 static void record_task(void *unused) {

@@ -33,5 +33,5 @@ const lv_font_t *ui_font_body(void)
 
 const lv_font_t *ui_font_title(void)
 {
-    return &lv_font_montserrat_20;
+    return ui_font_body();
 }

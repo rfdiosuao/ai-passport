@@ -1,8 +1,5 @@
 idf_component_register(
     SRCS "summon_voice.c" "summon_network.c"
-         "ui_pixel.c"
-         "ui_pixel_math.c"
-         "ui_text.c"
          "ui_font.c"
          "provisioning.c"
     INCLUDE_DIRS "."

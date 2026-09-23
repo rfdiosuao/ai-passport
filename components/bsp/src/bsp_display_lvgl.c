@@ -9,7 +9,7 @@
 
 static const char *TAG = "bsp_lvgl";
 
-#define BSP_LVGL_DRAW_BUFFER_LINES 20
+#define BSP_LVGL_DRAW_BUFFER_LINES 10
 
 static lv_display_t *s_disp;
 static bool s_port_initialized;
@@ -79,7 +79,7 @@ lv_display_t *bsp_lvgl_init(void) {
     const lvgl_port_display_cfg_t dc = {
         .panel_handle = bsp_display_panel(),
         .io_handle    = bsp_display_io(),
-        // ⚠ C3 无 PSRAM,DMA 只能用内部 RAM。40 行单缓冲约 19.2KB，
+        // ⚠ C3 无 PSRAM,DMA 只能用内部 RAM。10 行单缓冲约 4.8KB，
         // 可减少窗口命令和队列提交次数；仍保留单缓冲，避免双缓冲挤压音频/Wi-Fi。
         .buffer_size   = (uint32_t)BSP_LCD_W * BSP_LVGL_DRAW_BUFFER_LINES,
         .double_buffer = false,
