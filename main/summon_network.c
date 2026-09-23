@@ -46,7 +46,12 @@ bool summon_network_send(const char *json) {
     if(!connected || strlen(json)>=2048) return false;
     queued_frame frame={.text=strdup(json),.generation=generation};
     if(!frame.text) return false;
-    if(xQueueSend(outgoing,&frame,pdMS_TO_TICKS(100))!=pdTRUE) {free(frame.text);return false;}
+    /* Audio frames arrive every 32 ms. A deep queue retains many 1.4 KB
+     * JSON strings while mbedTLS needs a contiguous allocation for writes.
+     * Apply backpressure to the recorder instead of accumulating frames. */
+    if(xQueueSend(outgoing,&frame,pdMS_TO_TICKS(1000))!=pdTRUE) {
+        ESP_LOGE(TAG,"outbound frame queue stalled");free(frame.text);return false;
+    }
     return true;
 }
 static void event(void *arg,esp_event_base_t base,int32_t id,void *data) {
@@ -128,7 +133,7 @@ static void network_task(void *arg) {
 void summon_network_init(summon_receive_fn receive) {
     receiver=receive;nvs_handle_t h;
     if(nvs_open("summon",NVS_READONLY,&h)==ESP_OK) {size_t n=sizeof(token);if(nvs_get_str(h,"device_token",token,&n)!=ESP_OK) token[0]=0;nvs_close(h);}
-    enabled=provisioning_configured();incoming=xQueueCreate(12,sizeof(queued_frame));outgoing=xQueueCreate(16,sizeof(queued_frame));
+    enabled=provisioning_configured();incoming=xQueueCreate(12,sizeof(queued_frame));outgoing=xQueueCreate(2,sizeof(queued_frame));
     client_lock=xSemaphoreCreateMutex();
     if(!incoming || !outgoing || !client_lock) return;
     xTaskCreate(rx_task,"cloud_rx",6144,NULL,3,NULL);
