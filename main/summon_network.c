@@ -144,7 +144,12 @@ static void network_task(void *arg) {
 void summon_network_init(summon_receive_fn receive) {
     receiver=receive;nvs_handle_t h;
     if(nvs_open("summon",NVS_READONLY,&h)==ESP_OK) {size_t n=sizeof(token);if(nvs_get_str(h,"device_token",token,&n)!=ESP_OK) token[0]=0;nvs_close(h);}
-    enabled=provisioning_configured();incoming=xQueueCreate(12,sizeof(queued_frame));outgoing=xQueueCreate(2,sizeof(queued_frame));
+    enabled=provisioning_configured();
+    /* Playback ACKs are tiny, but they must not block the RX task while the
+     * ESP32 Wi-Fi/TLS client is flushing a previous frame. Keep the larger
+     * media queue bounded and reserve a deeper queue for ACK/status frames. */
+    incoming=xQueueCreate(12,sizeof(queued_frame));
+    outgoing=xQueueCreate(8,sizeof(queued_frame));
     client_lock=xSemaphoreCreateMutex();
     if(!incoming || !outgoing || !client_lock) return;
     xTaskCreate(rx_task,"cloud_rx",6144,NULL,3,NULL);
