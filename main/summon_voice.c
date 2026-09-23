@@ -99,7 +99,7 @@ static void playback_task(void *unused) {
     for(;;) {
         while(!playing) vTaskDelay(pdMS_TO_TICKS(10));
         unsigned id=turn,underruns=0,bytes=0;
-        // Four frames match the cloud's bounded send window (128 ms).
+        // Four frames provide a 128 ms buffer before playback begins.
         while(playing && !cancelled && !play_ended && uxQueueMessagesWaiting(playback)<4) vTaskDelay(pdMS_TO_TICKS(2));
         int64_t started=esp_timer_get_time();
         bool done=false;
@@ -193,8 +193,10 @@ static void receive(const char *line) {
                 chunk.length=len;
                 bool accepted=(unsigned)seq->valuedouble==play_sequence && xQueueSend(playback,&chunk,pdMS_TO_TICKS(500))==pdTRUE;
                 if(accepted) play_sequence++;
-                cJSON *ack=message(accepted ? "play.ack" : "play.error",turn);
-                cJSON_AddNumberToObject(ack,"seq",seq->valuedouble);send_json(ack);
+                else {
+                    cJSON *ack=message("play.error",turn);
+                    cJSON_AddNumberToObject(ack,"seq",seq->valuedouble);send_json(ack);
+                }
             }
         } else if(strcmp(op->valuestring,"play.end")==0 && playing) {
             playback_chunk end={.turn=turn,.length=0};play_ended=true;
