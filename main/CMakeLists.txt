@@ -3,7 +3,7 @@ idf_component_register(
          "ui_font.c"
          "provisioning.c"
     INCLUDE_DIRS "."
-    REQUIRES json mbedtls bsp esp_event esp_hw_support esp_http_server esp_netif esp_timer esp_wifi nvs_flash esp_websocket_client lwip
+    REQUIRES json mbedtls bsp esp_event esp_hw_support esp_netif esp_timer esp_wifi nvs_flash esp_websocket_client lwip
 )
 
 # 中文字库:按 docs/development/engineering/lvgl-chinese-fonts.md 第 4 节注册,

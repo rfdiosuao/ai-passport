@@ -33,7 +33,7 @@ bool summon_network_enabled(void) {return enabled;}
 void summon_network_enable(void) {enabled=true;}
 bool summon_network_set_token(const char *value) {
     size_t n=strlen(value);
-    if(n<32 || n>=sizeof(token) || client) return false;
+    if(n<32 || n>=sizeof(token)) return false;
     for(size_t i=0;i<n;i++) if(!strchr("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-",value[i])) return false;
     nvs_handle_t h;
     if(nvs_open("summon",NVS_READWRITE,&h)!=ESP_OK) return false;
@@ -111,13 +111,7 @@ static void tx_task(void *arg) {
 static void network_task(void *arg) {
     (void)arg;bool clock_started=false;unsigned retry=0;
     for(;;) {
-        if(provisioning_active() && client) {
-            xSemaphoreTake(client_lock,portMAX_DELAY);
-            connected=false;generation++;
-            esp_websocket_client_stop(client);esp_websocket_client_destroy(client);client=NULL;connected=false;
-            xSemaphoreGive(client_lock);
-        }
-        if(enabled && provisioning_configured() && !provisioning_active()) {
+        if(enabled && provisioning_configured()) {
             if(provisioning_state()!=PROV_CONNECTED) {
                 if(retry++%10==0) provisioning_connect_saved();
             } else if(token[0]) {
